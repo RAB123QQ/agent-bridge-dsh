@@ -1,18 +1,21 @@
 # agentbridge-dsh
 
+> 本目录由 [visualeafsama-hub/agentbridge-dsh](https://github.com/visualeafsama-hub/agentbridge-dsh)
+> 改进而来，新增 `claude_send` MCP 工具、Claude feed 记录与 attach 更新等功能。
+
 把 DSH（DeepSeek Harness）接入 [agent-bridge](https://github.com/raysonmeng/agent-bridge)
 （Claude Code ↔ Codex 的双向桥）的适配器。DSH 不是顶替某一端，而是作为
 **独立的对等成员**，既能与 `abg claude` 对接，也能与 `abg codex` 对接。
 
-![preview](preview.jpg)
+![preview](preview.png)
 
-> ### 🧩 配套插件：[dsh-pair-panel](https://github.com/visualeafsama-hub/dsh-pair-panel)
+> ### 🧩 配套插件：[dsh-pair-panel](https://github.com/RAB123QQ/agent-bridge-dsh/tree/main/dsh-pair-panel)
 > Codex 对端面板 —— 在 DSH Web GUI 里与会话并排显示 Codex 的实时状态、
 > 上下文用量与消息流。本仓库负责 MCP 适配器与推送钩子，面板 UI 由该插件提供。
 
 - agent-bridge 源码：https://github.com/raysonmeng/agent-bridge
 - agent-bridge 文档（中文）：https://raysonmeng.github.io/agent-bridge/zh/
-- 配套插件 dsh-pair-panel：https://github.com/visualeafsama-hub/dsh-pair-panel
+- 配套插件 dsh-pair-panel：https://github.com/RAB123QQ/agent-bridge-dsh/tree/main/dsh-pair-panel
 
 > **验证状态**：目前只在 **Codex 侧**（channel / attach，Role A）做过真实 pair
 > 联调。Role B（`--server`，对接 `abg claude`）有完整实现与 mock 闭环测试，
@@ -24,7 +27,7 @@
 `chromium`（DSH 窗口，默认取 PATH 里的 `chromium`，可用 `ABG_CHROMIUM_CMD` 覆盖）。
 
 ```bash
-git clone https://github.com/visualeafsama-hub/agentbridge-dsh.git
+git clone https://github.com/RAB123QQ/agent-bridge-dsh.git
 cd agentbridge-dsh
 ./install.sh                 # 安装 shim 到 ~/.bun/bin/abg
 # 或指定位置：./install.sh /custom/bin/abg
@@ -33,7 +36,7 @@ cd agentbridge-dsh
 `install.sh` 会生成 `abg` 薄包装：所有 `dsh` 子命令路由到本适配器，
 其余命令（doctor / pairs / resume / kill / --pair ...）原样透传给真 abg。
 
-启动 DSH 侧（可选配 [dsh-pair-panel](https://github.com/visualeafsama-hub/dsh-pair-panel)
+启动 DSH 侧（可选配 [dsh-pair-panel](https://github.com/RAB123QQ/agent-bridge-dsh/tree/main/dsh-pair-panel)
 插件显示 Codex 对端面板）：
 
 ```bash
@@ -191,7 +194,7 @@ DSH 侧用 `createUserMessage` 规范消息注入当前会话 inbox，实现**�
   （等待中的回复由 `send_message` 自己消费，避免重复唤醒）。
 - 实现：`bin/abg-dsh` 在 attach 成功后给 engine 挂 `onCodexMessage`；
   `lib/control-client.js` 在收到 `codex_to_claude` 时调用该钩子。
-- 配套插件：[dsh-pair-panel](https://github.com/visualeafsama-hub/dsh-pair-panel)
+- 配套插件：[dsh-pair-panel](https://github.com/RAB123QQ/agent-bridge-dsh/tree/main/dsh-pair-panel)
   的 host 侧 `/agentbridge/notify` 路由负责注入消息（必须用 `createUserMessage`
   带 `source.kind`，裸 `{role, content}` 会触发
   `Cannot read properties of undefined (reading 'kind')`）。

@@ -22,6 +22,11 @@ config/            DSH MCP 配置示例
 - **launcher / shims / config**：Windows 落地配套——自动探测依赖、生成命令 shim、
   配置 MCP、隐藏控制台窗口的一键启动。详见下文「Windows 安装步骤」。
 
+> **来源**：`agentbridge-dsh/` 与 `dsh-pair-panel/` 分别由
+> [visualeafsama-hub/agentbridge-dsh](https://github.com/visualeafsama-hub/agentbridge-dsh)
+> 和 [visualeafsama-hub/dsh-pair-panel](https://github.com/visualeafsama-hub/dsh-pair-panel)
+> 改进而来，完整 git 历史保留在各子目录中。
+
 所有机器相关路径都通过环境变量、脚本参数、PATH 或常见安装位置解析。文档和模板
 不包含个人用户名、真实绝对路径、API Key、token 或代理账号。
 

@@ -1,5 +1,8 @@
 # dsh-pair-panel
 
+> 本目录由 [visualeafsama-hub/dsh-pair-panel](https://github.com/visualeafsama-hub/dsh-pair-panel)
+> 改进而来，新增 Codex / Claude 双面板布局、面板启动按钮、`claude_send` 会话展示等功能。
+
 DSH Web GUI 插件：**Codex 对端面板** —— 与 DSH 会话并排显示 agentbridge 对端（Codex）的实时状态、上下文用量与消息流。
 
 ![preview](preview.png)
