@@ -2,6 +2,8 @@
 
 让 DSH（DeepSeek Harness）同时接入 **Codex pair** 与本机 **Claude Code** 的完整方案：MCP 适配器、对端面板、Windows 一键启动与配置。本仓库包含三个部分：
 
+![11](11.png)
+
 ```text
 agentbridge-dsh/   核心 MCP 适配器（Bun）：把 agent-bridge pair 协议转换为
                    DSH 可调用的 MCP 工具（send_message / get_messages /
