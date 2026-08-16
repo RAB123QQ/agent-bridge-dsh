@@ -27,8 +27,7 @@ config/            DSH MCP 配置示例
 > 和 [visualeafsama-hub/dsh-pair-panel](https://github.com/visualeafsama-hub/dsh-pair-panel)
 > 改进而来，完整 git 历史保留在各子目录中。
 
-所有机器相关路径都通过环境变量、脚本参数、PATH 或常见安装位置解析。文档和模板
-不包含个人用户名、真实绝对路径、API Key、token 或代理账号。
+
 
 ## 架构
 
