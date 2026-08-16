@@ -1,0 +1,10 @@
+@echo off
+rem chromium.cmd.template -- makes a plain `chromium` command available on
+rem Windows by pointing it at whatever Chromium/Chrome binary you have
+rem installed. agentbridge-dsh's `abg dsh` uses this (or $env:ABG_CHROMIUM_CMD
+rem if set) to open the DSH web GUI as an --app= window.
+rem
+rem Fill in the placeholder (install-shims.ps1 auto-detects a Chrome/Chromium
+rem install and does this for you):
+rem   %CHROME_EXE%   absolute path to chrome.exe / chromium.exe
+"%CHROME_EXE%" %*

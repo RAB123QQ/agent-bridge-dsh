@@ -1,0 +1,15 @@
+@echo off
+rem dsh.cmd.template -- Windows cmd shim that runs the DSH (DeepSeek Harness)
+rem CLI directly via node.exe, bypassing npx for a fast, offline start.
+rem
+rem Fill in both placeholders (install-shims.ps1 does this for you by
+rem auto-detecting node.exe on PATH and the newest @deepseek-ai/dsh install
+rem it can find under the npm/npx caches):
+rem   %NODE_EXE%    absolute path to node.exe
+rem   %DSH_BIN_JS%  absolute path to .../@deepseek-ai/dsh/lib/bin.js
+rem
+rem If you installed dsh globally (`npm install -g @deepseek-ai/dsh`), you
+rem do not need this shim at all -- the npm-generated `dsh` command already
+rem works. This shim exists for the "no global install, just run from the
+rem npx cache" workflow.
+"%NODE_EXE%" "%DSH_BIN_JS%" %*

@@ -1,0 +1,41 @@
+@echo off
+rem abg.cmd.template -- Windows cmd shim for the `abg` command.
+rem
+rem `abg dsh ...` is routed to the agentbridge-dsh adapter (run via `bun`);
+rem every other subcommand (doctor / pairs / resume / kill / --pair ...) is
+rem passed through, unmodified, to the real `abg` found further down PATH.
+rem
+rem Install with install-shims.ps1 (recommended) instead of editing this
+rem file by hand. If you do edit it by hand, replace the placeholder below:
+rem   %ADAPTER_PATH%   absolute path to agentbridge-dsh\bin\abg-dsh
+rem
+rem Known Windows pitfall: if this shim is ever spawned via Node's
+rem child_process.spawn() (not spawnSync, not through a shell), spawning a
+rem .cmd file directly fails silently on some Node versions because .cmd is
+rem not a native executable -- Windows needs cmd.exe /c to run it. Programs
+rem that shell out to `abg` from Node should either set {shell: true} or
+rem call this via cmd.exe /c explicitly. Plain interactive shell use
+rem (Git Bash, cmd.exe, PowerShell) is unaffected.
+
+setlocal enabledelayedexpansion
+set "ADAPTER=%ADAPTER_PATH%"
+
+rem --- route the `dsh` subcommand to the agentbridge-dsh adapter ---
+set "HASDSH="
+for %%a in (%*) do if /i "%%~a"=="dsh" set "HASDSH=1"
+if defined HASDSH (
+  bun "%ADAPTER%" %*
+  exit /b !errorlevel!
+)
+
+rem --- pass through to the real abg (skip this shim; PATH may contain spaces) ---
+set "SELF=%~f0"
+for %%d in ("%PATH:;=";"%") do (
+  set "D=%%~d"
+  if exist "!D!\abg.cmd" if /i not "!D!\abg.cmd"=="%SELF%" (
+    "!D!\abg.cmd" %*
+    exit /b !errorlevel!
+  )
+)
+echo abg: real abg not found on PATH 1>&2
+exit /b 1

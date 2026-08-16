@@ -1,0 +1,42 @@
+#!/usr/bin/env pwsh
+# abg.ps1.template -- PowerShell shim for the `abg` command.
+#
+# `abg dsh ...` routes to the agentbridge-dsh adapter (run via `bun`);
+# everything else passes through to the real `abg` found on PATH.
+#
+# Install with install-shims.ps1 (recommended) instead of editing this file
+# by hand. If you do edit it by hand, replace the placeholder below:
+#   %ADAPTER_PATH%   absolute path to agentbridge-dsh\bin\abg-dsh
+
+$adapter = '%ADAPTER_PATH%'
+$self = $PSCommandPath
+
+$hasDsh = $false
+foreach ($a in $args) { if ($a -ieq 'dsh') { $hasDsh = $true; break } }
+
+if ($hasDsh) {
+  & bun $adapter @args
+  exit $LASTEXITCODE
+}
+
+# Pass through: scan PATH for the real abg (abg.ps1 / abg.cmd), skipping this shim.
+$real = $null
+foreach ($d in ($env:PATH -split ';')) {
+  if (-not $d) { continue }
+  foreach ($name in @('abg.ps1', 'abg.cmd')) {
+    $cand = Join-Path $d $name
+    if (Test-Path -LiteralPath $cand) {
+      $rp = (Resolve-Path -LiteralPath $cand).Path
+      if ($rp -ne $self) { $real = $cand; break }
+    }
+  }
+  if ($real) { break }
+}
+
+if ($real) {
+  & $real @args
+  exit $LASTEXITCODE
+}
+
+Write-Error 'abg: real abg not found on PATH'
+exit 1

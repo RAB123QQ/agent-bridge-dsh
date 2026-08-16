@@ -1,0 +1,35 @@
+# cordis.patch.yml.example — DSH 接入 agentbridge-dsh 的 MCP 配置示例
+#
+# 文件位置：$DSH_HOME/profiles/web/cordis.patch.yml
+#   （DSH_HOME 默认是 %USERPROFILE%\.dsh，也可能被启动脚本 / 环境变量覆盖）
+#
+# 这份文件是 cordis 的“覆盖”配置，语义是 override，不是简单追加：
+# 新增一个插件条目必须用 `- insert:` 包一层，直接写 `- id: ...` 会被判定
+# 成“entry not found”而静默丢弃（dump-config 默认不读 user layer，看不出问题，
+# 只有实际跑起来工具列表里没有 mcp__abg__* 才会发现）。
+#
+# 用法：
+#   1. 先确认 agentbridge-dsh 的 MCP server 已经在跑：
+#        abg dsh --pair <NAME>              一键：MCP + DSH web + chromium 窗口
+#      或只起适配器：
+#        abg dsh mcp --mode channel --http-port 8765
+#   2. 把下面这段（按需去掉最外层的注释）追加/合并进
+#      $DSH_HOME/profiles/web/cordis.patch.yml。
+#   3. 保存后 DSH web 通常会 HMR 热生效；如果工具列表没有更新，
+#      重启一次 dsh web 进程（例如 `pkill -f "dsh web"` 后重新启动）。
+#
+# 生效后，DSH 会话的工具列表里会出现：
+#   mcp__abg__send_message   给 codex/claude 对端发消息并等待这一轮回复
+#   mcp__abg__get_messages   取对端发来的、还没被消费的消息
+#   mcp__abg__pair_status    查 agent-bridge daemon / app-server 是否可达
+#   mcp__abg__claude_send    跑一次性的 `claude -p` 提示并拿到 Claude 的回复
+#                            （readonly: true 用 --permission-mode plan 只读；
+#                             continue 默认 true，延续 cwd 里最近一次会话）
+
+- insert:
+    - id: mcp-agentbridge
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: abg
+        transport: streamable-http
+        url: http://127.0.0.1:8765/mcp
