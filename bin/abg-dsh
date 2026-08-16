@@ -237,7 +237,7 @@ async function cmdEnv(args) {
       }).catch((e) => log(`notify push failed: ${e?.message ?? e}`));
     };
   }
-  const mcp = new McpServer({ mode, engine, log });
+  const mcp = new McpServer({ mode, engine, log, claudeCwd: pair.cwd });
   const srv = await serveHttp(mcp, httpPort);
   log(`MCP ready: ${mcpUrl}`);
 
@@ -313,10 +313,16 @@ async function cmdStart(args) {
   let mode;
   if (server) {
     mode = "server";
-    engine = new DshAppServer({ port: appPort, mock: false, log });
+    engine = new DshAppServer({
+      port: appPort,
+      mock: false,
+      log,
+      feedFile: join(STATE_DIR, "pairs", pair.pairId, "dsh-claude-feed.jsonl"),
+    });
     await engine.start();
     log(`Role B: DSH is now pair ${pair.name}'s codex app-server on ws://127.0.0.1:${appPort}`);
     log(`        (start the pair with abg claude and the daemon will connect here)`);
+    log(`        (claude feed -> ${join(STATE_DIR, "pairs", pair.pairId, "dsh-claude-feed.jsonl")})`);
   } else {
     mode = "channel";
     engine = new ChannelClient({ proxyPort, log });
@@ -325,7 +331,7 @@ async function cmdStart(args) {
     log(`Role A: connected to pair ${pair.name} through daemon proxy ws://127.0.0.1:${proxyPort}`);
   }
 
-  const mcp = new McpServer({ mode, engine, log });
+  const mcp = new McpServer({ mode, engine, log, claudeCwd: pair.cwd });
   const srv = await serveHttp(mcp, httpPort);
   log(`MCP ready: http://127.0.0.1:${srv.port}/mcp  (mode=${mode}, Ctrl-C to stop)`);
   log("");
@@ -427,7 +433,7 @@ async function cmdDaemonMcp(args) {
   }
   const pair = discoverPair(args);
   const { mode, engine } = await makeEngine(pair, args, log);
-  const mcp = new McpServer({ mode, engine, log });
+  const mcp = new McpServer({ mode, engine, log, claudeCwd: pair.cwd });
   const srv = await serveHttp(mcp, httpPort);
   log(`MCP ready: http://127.0.0.1:${srv.port}/mcp (mode=${mode}, Ctrl-C to stop)`);
   process.on("SIGINT", () => {
@@ -459,7 +465,7 @@ async function cmdMcp(args) {
     return 1;
   }
 
-  const mcp = new McpServer({ mode, engine, log });
+  const mcp = new McpServer({ mode, engine, log, claudeCwd: process.env.ABG_PAIR_CWD || null });
   if (stdio) {
     await serveStdio(mcp);
     await new Promise(() => {});
