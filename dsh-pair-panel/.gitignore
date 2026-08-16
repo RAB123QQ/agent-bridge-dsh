@@ -1,0 +1,7 @@
+# local history backups — never commit
+snapshots/
+
+# OS / editor noise
+.DS_Store
+*.swp
+*.log

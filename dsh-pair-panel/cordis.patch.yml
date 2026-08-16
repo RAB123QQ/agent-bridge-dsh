@@ -1,0 +1,5 @@
+# pair-panel bundle patch: inserts its public dsh.client entry into the web plugin roster.
+# Install with `dsh plugin --profile web add <path>`; the bundle is the official dsh plugin shape.
+- insert:
+    - id: ui-pair-panel
+      name: '@dsh-external/dsh-client-ui-pair-panel'

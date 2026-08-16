@@ -1,39 +1,26 @@
-# DSH 调度 Claude Code + Codex（Windows 配套包）
+# DSH 调度 Claude Code + Codex
 
-## 项目简介
-
-这是一份面向 **Windows** 的 DSH（DeepSeek Harness）集成配套包，提供
-launcher、命令 shim 和 MCP 配置示例，用于把以下组件组合成一套可复用的本地
-工作流：
-
-- DSH Web：作为会话界面和调度入口；
-- [agentbridge-dsh](https://github.com/RAB123QQ/agent-bridge-dsh)：把
-  agent-bridge pair 协议转换为 DSH 可调用的 MCP 工具；
-- dsh-pair-panel：在 DSH Web 右侧显示 Codex / Claude 对端消息；
-- Claude Code：通过本机 `claude -p` 接受一次性任务；
-- Codex：通过 agent-bridge pair 与 DSH 双向通信。
-
-这个配套包不是 agentbridge-dsh 适配器本体，也不包含 Claude Code、Codex、
-agent-bridge 或 DSH 本身。它解决的是 Windows 上的安装与启动衔接问题：自动探测
-依赖、生成 shim、配置 MCP，并提供可隐藏控制台窗口的一键启动脚本。
-
-仓库内容：
+让 DSH（DeepSeek Harness）同时接入 **Codex pair** 与本机 **Claude Code** 的完整方案：MCP 适配器、对端面板、Windows 一键启动与配置。本仓库包含三个部分：
 
 ```text
-launcher/
-  launch-dsh.ps1             一键启动 DSH Web、adapter 和浏览器窗口
-  launch-dsh.vbs             隐藏 PowerShell 控制台的桌面入口
-shims/
-  install-shims.ps1          自动探测依赖并安装 Windows shim
-  abg.cmd.template
-  abg.ps1.template
-  dsh.cmd.template
-  chromium.cmd.template
-config/
-  cordis.patch.yml.example   DSH MCP 配置示例
-README.md
-LICENSE
+agentbridge-dsh/   核心 MCP 适配器（Bun）：把 agent-bridge pair 协议转换为
+                   DSH 可调用的 MCP 工具（send_message / get_messages /
+                   pair_status / claude_send）
+dsh-pair-panel/    DSH Web 插件：右侧显示 Codex / Claude 对端面板
+launcher/          Windows 一键启动脚本（DSH Web + adapter + 浏览器窗口）
+shims/             Windows 命令 shim 模板（abg / dsh / chromium）
+config/            DSH MCP 配置示例
 ```
+
+- **agentbridge-dsh**（[子目录](agentbridge-dsh/)）：用 Bun 运行的 MCP 适配器，连接
+  [agent-bridge](https://github.com/raysonmeng/agent-bridge) daemon，让 DSH 既能加入
+  Codex pair（channel/attach），也能对接 `abg claude`（server 模式）。详细用法见
+  [agentbridge-dsh/README.md](agentbridge-dsh/README.md)。
+- **dsh-pair-panel**（[子目录](dsh-pair-panel/)）：DSH Web 网页插件，读取 Codex
+  rollout、适配器 feed 和 Claude Code 会话记录，显示单面板或 Codex / Claude 双面板。
+  安装与配置见 [dsh-pair-panel/README.md](dsh-pair-panel/README.md)。
+- **launcher / shims / config**：Windows 落地配套——自动探测依赖、生成命令 shim、
+  配置 MCP、隐藏控制台窗口的一键启动。详见下文「Windows 安装步骤」。
 
 所有机器相关路径都通过环境变量、脚本参数、PATH 或常见安装位置解析。文档和模板
 不包含个人用户名、真实绝对路径、API Key、token 或代理账号。
@@ -116,30 +103,42 @@ where.exe claude
 先安装 Bun、Node.js、agent-bridge、Codex CLI、Claude Code CLI、DSH 和
 Chrome/Chromium，并确认上一节中的命令均能被找到。
 
-### 2. 克隆 agentbridge-dsh
+### 2. 克隆本仓库
 
 ```bash
-git clone https://github.com/RAB123QQ/agent-bridge-dsh.git "$HOME/agentbridge-dsh"
+git clone https://github.com/RAB123QQ/agent-bridge-dsh.git ~/agent-bridge-dsh
+cd ~/agent-bridge-dsh
 ```
 
-### 3. 下载本配套包
-
-下载或克隆本配套包，然后进入包含 `launcher/`、`shims/`、`config/` 的目录：
+### 3. 安装 agentbridge-dsh 适配器
 
 ```bash
-cd /path/to/dsh-windows-package
+cd agentbridge-dsh
+./install.sh          # 安装 abg shim 到 ~/.bun/bin/abg
 ```
 
-`/path/to/dsh-windows-package` 只是占位符，请替换为配套包的实际目录；不要把个人
-绝对路径写进准备公开的脚本或配置。
+`install.sh` 生成 `abg` 薄包装：所有 `dsh` 子命令路由到本适配器，其余命令
+（doctor / pairs / resume / kill / --pair ...）原样透传给真 abg。详细说明见
+[agentbridge-dsh/README.md](agentbridge-dsh/README.md)。
 
-### 4. 安装 Windows shim
-
-Git Bash 的 `$HOME/...` 是 POSIX 路径，而 PowerShell 需要 Windows 路径，因此
-使用 `cygpath -w` 转换：
+### 4. 安装 dsh-pair-panel 面板插件（可选）
 
 ```bash
-export AGENTBRIDGE_DSH_DIR="$(cygpath -w "$HOME/agentbridge-dsh")"
+cd ~/agent-bridge-dsh
+dsh plugin --profile web add "$PWD/dsh-pair-panel"
+```
+
+安装后重启 `abg dsh --pair <name>`（或刷新已打开的页面）。详见
+[dsh-pair-panel/README.md](dsh-pair-panel/README.md)。
+
+### 5. 安装 Windows shim
+
+在仓库根目录执行（Git Bash 的 `$HOME/...` 是 POSIX 路径，PowerShell 需要
+Windows 路径，因此使用 `cygpath -w` 转换）：
+
+```bash
+cd ~/agent-bridge-dsh
+export AGENTBRIDGE_DSH_DIR="$(cygpath -w "$HOME/agent-bridge-dsh/agentbridge-dsh")"
 powershell.exe -NoProfile -ExecutionPolicy Bypass \
   -File "$(cygpath -w "$PWD/shims/install-shims.ps1")"
 ```
@@ -164,7 +163,7 @@ abg dsh --help
 `abg doctor` 应继续调用真实 agent-bridge；`abg dsh --help` 应显示
 agentbridge-dsh 的帮助。
 
-### 5. 配置 DSH MCP
+### 6. 配置 DSH MCP
 
 把 `config/cordis.patch.yml.example` 中的插件配置合并到：
 
@@ -189,7 +188,7 @@ $DSH_HOME/profiles/web/cordis.patch.yml
 `cordis.patch.yml` 是 override 配置，直接新增 `- id:` 可能被静默忽略。保存后如果
 DSH 工具列表没有更新，请重启 `dsh web`。
 
-### 6. 配置桌面启动器（可选）
+### 7. 配置桌面启动器（可选）
 
 `launcher/launch-dsh.vbs` 与 `launcher/launch-dsh.ps1` 应放在同一目录。桌面
 快捷方式指向 `launch-dsh.vbs`，它会隐藏 PowerShell 控制台窗口。
