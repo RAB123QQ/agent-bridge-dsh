@@ -1,0 +1,10 @@
+# runtime state (pid files, bridge marks) — never commit
+run/
+
+# local test artifacts
+test/tmp/
+*.log
+
+# OS / editor noise
+.DS_Store
+*.swp

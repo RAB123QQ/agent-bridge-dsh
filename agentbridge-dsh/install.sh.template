@@ -1,0 +1,38 @@
+#!/bin/sh
+# abg shim — `abg dsh ...` 交给 DSH<->agent-bridge 适配器；其余一切原样透传给真 abg
+# （doctor / pairs / resume / kill / --pair 等全部保持 abg 原生行为）
+#
+# 由 install.sh 生成，路径指向 agentbridge-dsh 的 bin/abg-dsh。
+SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+ADAPTER="__ADAPTER_PATH__"
+
+find_real_abg() {
+  IFS=:
+  for d in $PATH; do
+    [ -n "$d" ] || d=.
+    if [ -x "$d/abg" ]; then
+      rp="$(readlink -f "$d/abg" 2>/dev/null || echo "$d/abg")"
+      if [ "$rp" != "$SELF" ]; then
+        echo "$d/abg"
+        return 0
+      fi
+    fi
+  done
+  return 1
+}
+
+REAL_ABG="$(find_real_abg)"
+
+# `dsh` 出现在参数里（支持 abg --pair X dsh 和 abg dsh --pair X 两种写法）
+for a in "$@"; do
+  if [ "$a" = "dsh" ]; then
+    exec bun "$ADAPTER" "$@"
+  fi
+done
+
+if [ -n "$REAL_ABG" ]; then
+  exec "$REAL_ABG" "$@"
+fi
+
+echo "abg: real abg not found on PATH" >&2
+exit 1

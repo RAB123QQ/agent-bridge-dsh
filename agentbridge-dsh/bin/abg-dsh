@@ -1,0 +1,627 @@
+#!/usr/bin/env bun
+// abg-dsh — the `abg dsh` command: connect DSH (DeepSeek Harness) to the
+// current agent-bridge pair as a peer that can interface with either
+// `abg claude` (Role B, --server) or `abg codex` (Role A, default).
+//
+//   abg dsh                 start DSH side for the current pair (channel mode)
+//   abg dsh --server        start DSH as the pair's codex app-server (Role B)
+//   abg dsh --pair KF       pick a pair by name (works from any directory)
+//   abg --pair KF dsh       same, abg-style flag placement
+//   abg dsh --http-port N   MCP http port (default 8765)
+//   abg dsh --channel        use secondary channel instead of attach (default)
+//
+//   power-user subcommands still available:
+//   abg dsh channel --proxy-port N --send "text"     one-shot message
+//   abg dsh server --port N [--mock]                  standalone app-server
+//   abg dsh stub ...                                  codex CLI stub (internal)
+//   abg dsh doctor                                    pair port health
+//   abg dsh watch --pair NAME [--lines N] [-f/--follow] [--since "HH:MM"]
+//
+// Pair discovery: registry at $ABG_STATE_DIR/../pairs/registry.json (default
+// ~/.local/state/agentbridge/pairs), matched by cwd or --pair name; ports from
+// the pair's daemon.json (fallback: slot*10 offset from 4500).
+
+import { readFileSync, existsSync, mkdirSync, writeFileSync, openSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
+import { spawn, spawnSync } from "node:child_process";
+import { ChannelClient } from "../lib/channel-client.js";
+import { watchPair, currentThreadId, rolloutFile, followStream } from "../lib/watch.js";
+import { ControlClient, identityForPair } from "../lib/control-client.js";
+import { DshAppServer, codexStubMain } from "../lib/app-server.js";
+import { McpServer, serveHttp, serveStdio } from "../lib/mcp.js";
+
+const log = (m) => console.error(`[abg-dsh] ${m}`);
+
+const STATE_DIR = process.env.ABG_STATE_DIR ?? join(homedir(), ".local/state/agentbridge");
+const REGISTRY = join(STATE_DIR, "pairs/registry.json");
+const DEFAULT_MCP_PORT = parseInt(process.env.ABG_MCP_PORT ?? "8765", 10);
+const RUN_DIR = process.env.ABG_RUN_DIR ?? join(homedir(), "agentbridge-dsh/run");
+const DSH_WEB_URL = process.env.ABG_DSH_WEB_URL ?? "http://127.0.0.1:3080";
+const DSH_WEB_PORT = parseInt(new URL(DSH_WEB_URL).port, 10) || 3080;
+const DSH_WEB_CMD = (process.env.ABG_DSH_WEB_CMD ?? "dsh web").split(/\s+/).filter(Boolean);
+const CHROMIUM_CMD = process.env.ABG_CHROMIUM_CMD ?? "chromium";
+
+function usage() {
+  console.log(`Usage:
+  abg dsh --pair NAME     one-key: DSH web + chromium window + bridge into the pair (--pair REQUIRED)
+  abg dsh --server --pair NAME
+                          Role B: DSH as the pair's codex app-server (for abg claude pairing)
+  abg dsh --http-port N   MCP http port (default ${DEFAULT_MCP_PORT})
+  abg dsh channel --proxy-port N --send "text"
+  abg dsh server --port N [--mock]
+  abg dsh watch --pair NAME [--lines N] [-f/--follow] [--since "HH:MM"]
+  abg dsh doctor
+
+Env: ABG_STATE_DIR, ABG_MCP_PORT, ABG_PROXY_PORT, ABG_APP_PORT.`);
+}
+
+function argValue(args, names, fallback) {
+  for (const n of names) {
+    const i = args.indexOf(n);
+    if (i >= 0 && args[i + 1] !== undefined) return args[i + 1];
+  }
+  return fallback;
+}
+
+// ── pair discovery ─────────────────────────────────────────────────────────
+
+function discoverPair(args) {
+  const cwd = process.cwd();
+  const name = argValue(args, ["--pair"], process.env.ABG_PAIR_NAME ?? null);
+  let registry = { pairs: [] };
+  if (existsSync(REGISTRY)) {
+    try {
+      registry = JSON.parse(readFileSync(REGISTRY, "utf8"));
+    } catch (e) {
+      log(`warning: cannot read ${REGISTRY}: ${e.message}`);
+    }
+  }
+  const inCwd = registry.pairs.filter((p) => p.cwd === cwd);
+  let pick = null;
+  if (name) pick = inCwd.find((p) => p.name === name) ?? registry.pairs.find((p) => p.name === name) ?? null;
+  if (!pick) pick = inCwd.find((p) => isLive(p)) ?? inCwd[0] ?? registry.pairs[0] ?? null;
+  if (!pick) {
+    throw new Error(
+      `no agent-bridge pair found for cwd=${cwd}${name ? ` (name=${name})` : ""}. ` +
+        `Run \`abg\` in the pair's directory first, or pass --pair NAME.`
+    );
+  }
+  const ports = pairPortsOf(pick);
+  log(`pair: ${pick.name} (${pick.pairId}) ports=${ports.appPort}/${ports.proxyPort}/${ports.controlPort}`);
+  return { ...pick, ports };
+}
+
+function isLive(p) {
+  try {
+    const d = JSON.parse(readFileSync(join(STATE_DIR, `pairs/${p.pairId}/daemon.json`), "utf8"));
+    return d.phase === "ready" && !!d.ports;
+  } catch {
+    return false;
+  }
+}
+
+function pairPortsOf(pick) {
+  try {
+    const d = JSON.parse(readFileSync(join(STATE_DIR, `pairs/${pick.pairId}/daemon.json`), "utf8"));
+    if (d.ports) return d.ports;
+  } catch {}
+  const base = 4500 + (pick.slot ?? 0) * 10;
+  return { appPort: base, proxyPort: base + 1, controlPort: base + 2 };
+}
+
+// ── default: abg dsh (start DSH side) ─────────────────────────────────────
+
+async function isHttpAlive(url, timeoutMs = 1500) {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+    return res.status < 500;
+  } catch {
+    return false;
+  }
+}
+
+function readBridgeMark(name) {
+  try {
+    return readFileSync(join(RUN_DIR, `bridge.${name}`), "utf8").trim();
+  } catch {
+    return null;
+  }
+}
+
+function writeBridgeMark(name, value) {
+  mkdirSync(RUN_DIR, { recursive: true });
+  writeFileSync(join(RUN_DIR, `bridge.${name}`), value);
+}
+
+async function mcpAlive(port) {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0", id: 0, method: "initialize",
+        params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "probe", version: "0" } },
+      }),
+      signal: AbortSignal.timeout(1500),
+    });
+    return res.status < 500;
+  } catch {
+    return false;
+  }
+}
+
+function startDetached(cmd, args, logName) {
+  mkdirSync(RUN_DIR, { recursive: true });
+  const out = openSync(join(RUN_DIR, logName), "a");
+  const child = spawn(cmd, args, { detached: true, stdio: ["ignore", out, out] });
+  writeFileSync(join(RUN_DIR, `${logName}.pid`), String(child.pid));
+  child.unref();
+  return child.pid;
+}
+
+function chromiumAppRunning() {
+  const res = spawnSync("pgrep", ["-f", `chromium.*--app=${DSH_WEB_URL.replace(/[/:]/g, ".")}`]);
+  // URL contains regex chars; fall back to a simple match below
+  if (res.status === 0 && res.stdout.toString().trim().length > 0) return true;
+  const res2 = spawnSync("ps", ["-eo", "args"]);
+  if (res2.status !== 0) return false;
+  return res2.stdout.toString().split("\n").some((l) => l.includes("--app=") && l.includes(DSH_WEB_URL) && l.includes("chromium"));
+}
+
+async function cmdEnv(args) {
+  const httpPort = parseInt(argValue(args, ["--http-port"], String(DEFAULT_MCP_PORT)), 10);
+  const explicitPair = argValue(args, ["--pair"], process.env.ABG_PAIR_NAME ?? null);
+  if (!explicitPair) {
+    log("必须显式指定 pair：abg dsh --pair NAME（禁止默认发现，防止连错 pair）");
+    return 1;
+  }
+  const pair = discoverPair(args);
+  const proxyPort = parseInt(argValue(args, ["--proxy-port"], String(pair.ports.proxyPort)), 10);
+  const startedPids = [];
+
+  // 1) MCP adapter into the pair FIRST (so a freshly started DSH web finds
+  //    the MCP server already up when its dsh-mcp-client loads the patch).
+  //    FOREGROUND, Ctrl-C stops it.
+  const mcpUrl = `http://127.0.0.1:${httpPort}/mcp`;
+  const alive = await mcpAlive(httpPort);
+  if (alive) {
+    const existing = readBridgeMark("pair");
+    const oldPid = readBridgeMark("pid");
+    if (existing === pair.name) {
+      log(`DSH bridge: already serving pair ${pair.name} at ${mcpUrl} (skip)`);
+      return 0;
+    }
+    if (oldPid && Number(oldPid) > 0) {
+      try {
+        process.kill(Number(oldPid), "SIGTERM");
+        log(`DSH bridge: replaced adapter on ${mcpUrl} (was pair ${existing ?? "unknown"}) -> ${pair.name}`);
+        await new Promise((r) => setTimeout(r, 800));
+      } catch {
+        log(`DSH bridge: ${mcpUrl} occupied by an unmanaged process; stop it first and retry.`);
+        return 1;
+      }
+    } else {
+      log(`DSH bridge: ${mcpUrl} occupied by an unmanaged process; stop it first and retry.`);
+      return 1;
+    }
+  }
+
+  log(`DSH bridge: serving pair ${pair.name} on ${mcpUrl} — foreground, Ctrl-C to stop`);
+  log("");
+  log("DSH 接入配置（$DSH_HOME/profiles/web/cordis.patch.yml，HMR 热生效）:");
+  log(`  - id: mcp-agentbridge`);
+  log(`    name: '@deepseek-ai/dsh-mcp-client'`);
+  log(`    config: { serverName: abg, transport: streamable-http, url: ${mcpUrl} }`);
+  log(`之后本会话工具列表出现 mcp__abg__send_message / get_messages / pair_status`);
+
+  const { mode, engine } = await makeEngine(pair, args, log);
+  writeBridgeMark("pair", pair.name);
+  writeBridgeMark("pid", String(process.pid));
+  // Push notifications: when codex sends a message while no send_message
+  // call is waiting for it, poke the DSH host route so the current agent
+  // session is woken up (real push, not get_messages polling).
+  if (mode === "attach" && typeof engine.onCodexMessage !== "function") {
+    engine.onCodexMessage = (msg) => {
+      const content = typeof msg?.content === "string" ? msg.content : null;
+      if (!content) return;
+      const id = String(msg.id ?? "");
+      if (id.startsWith("system_")) return; // system chatter, not a reply
+      // avoid double-wake when a send_message is already waiting for this reply
+      if (engine.pending && engine.pending.size > 0) return;
+      fetch(`${DSH_WEB_URL}/agentbridge/notify`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id, content, ts: msg.timestamp ?? null }),
+        signal: AbortSignal.timeout(1500),
+      }).catch((e) => log(`notify push failed: ${e?.message ?? e}`));
+    };
+  }
+  const mcp = new McpServer({ mode, engine, log, claudeCwd: pair.cwd });
+  const srv = await serveHttp(mcp, httpPort);
+  log(`MCP ready: ${mcpUrl}`);
+
+  // 2) DSH web (now that the MCP server is up, dsh-mcp-client will find it)
+  const webUrl = DSH_WEB_URL;
+  if (await isHttpAlive(webUrl)) {
+    log(`DSH web: already running at ${webUrl} (skip)`);
+  } else {
+    const pid = startDetached(DSH_WEB_CMD[0], DSH_WEB_CMD.slice(1), "dsh-web");
+    startedPids.push(pid);
+    log(`DSH web: starting \`${DSH_WEB_CMD.join(" ")}\` (pid ${pid}) -> ${webUrl}`);
+  }
+
+  // 3) chromium app window
+  if (chromiumAppRunning()) {
+    log(`DSH window: chromium --incognito --app=${webUrl} already open (skip)`);
+  } else {
+    const pid = startDetached(CHROMIUM_CMD, ["--incognito", `--app=${webUrl}`], "chromium");
+    startedPids.push(pid);
+    log(`DSH window: opening chromium --incognito --app=${webUrl} (pid ${pid})`);
+  }
+
+  // 4) default: stream the claude<->codex conversation of this pair
+  if (!args.includes("--no-watch")) {
+    try {
+      const tid = currentThreadId(pair.name);
+      const file = tid ? rolloutFile(tid) : null;
+      if (file) {
+        log(`对话流: watching ${pair.name} thread ${tid?.slice(0, 8)}… (--no-watch 关闭)`);
+        const stopWatch = followStream(file, (text, role) => {
+          const tag = role === "assistant" ? "codex" : role === "user" ? "claude" : "event";
+          console.log(`[${pair.name}/${tag}] ${text.replace(/\n+/g, "\n         ")}`);
+          console.log("");
+        });
+        process.on("SIGINT", () => stopWatch());
+      } else {
+        log(`对话流: ${pair.name} 还没有 current thread（daemon 未 attach）`);
+      }
+    } catch (e) {
+      log(`对话流: 不可用 (${e.message})`);
+    }
+  }
+
+  process.on("SIGINT", () => {
+    srv.stop(true);
+    for (const pid of startedPids) {
+      try {
+        process.kill(pid, "SIGTERM");
+      } catch {}
+    }
+    log(`stopped (adapter + ${startedPids.length} process(es) started this run)`);
+    process.exit(0);
+  });
+  await new Promise(() => {});
+  return 0;
+}
+
+async function cmdStart(args) {
+  if (!args.includes("--server")) {
+    return await cmdEnv(args);
+  }
+  const server = args.includes("--server");
+  const httpPort = parseInt(argValue(args, ["--http-port"], String(DEFAULT_MCP_PORT)), 10);
+  if (!argValue(args, ["--pair"], process.env.ABG_PAIR_NAME ?? null)) {
+    log("必须显式指定 pair：abg dsh --server --pair NAME");
+    return 1;
+  }
+  const pair = discoverPair(args);
+  const proxyPort = parseInt(argValue(args, ["--proxy-port"], String(pair.ports.proxyPort)), 10);
+  const appPort = parseInt(argValue(args, ["--app-port"], String(pair.ports.appPort)), 10);
+
+  let engine;
+  let mode;
+  if (server) {
+    mode = "server";
+    engine = new DshAppServer({
+      port: appPort,
+      mock: false,
+      log,
+      feedFile: join(STATE_DIR, "pairs", pair.pairId, "dsh-claude-feed.jsonl"),
+    });
+    await engine.start();
+    log(`Role B: DSH is now pair ${pair.name}'s codex app-server on ws://127.0.0.1:${appPort}`);
+    log(`        (start the pair with abg claude and the daemon will connect here)`);
+    log(`        (claude feed -> ${join(STATE_DIR, "pairs", pair.pairId, "dsh-claude-feed.jsonl")})`);
+  } else {
+    mode = "channel";
+    engine = new ChannelClient({ proxyPort, log });
+    await engine.connect();
+    await engine.initialize();
+    log(`Role A: connected to pair ${pair.name} through daemon proxy ws://127.0.0.1:${proxyPort}`);
+  }
+
+  const mcp = new McpServer({ mode, engine, log, claudeCwd: pair.cwd });
+  const srv = await serveHttp(mcp, httpPort);
+  log(`MCP ready: http://127.0.0.1:${srv.port}/mcp  (mode=${mode}, Ctrl-C to stop)`);
+  log("");
+  log(`DSH 接入配置（$DSH_HOME/profiles/web/cordis.patch.yml，HMR 热生效）:`);
+  log(`  - id: mcp-agentbridge`);
+  log(`    name: '@deepseek-ai/dsh-mcp-client'`);
+  log(`    config: { serverName: abg, transport: streamable-http, url: http://127.0.0.1:${srv.port}/mcp }`);
+  log(`之后本会话工具列表出现 mcp__abg__send_message / get_messages / pair_status`);
+
+  process.on("SIGINT", () => {
+    srv.stop(true);
+    process.exit(0);
+  });
+  await new Promise(() => {});
+}
+
+// ── legacy subcommands (power users) ──────────────────────────────────────
+
+async function cmdChannel(args) {
+  const proxyPort = parseInt(argValue(args, ["--proxy-port"], process.env.ABG_PROXY_PORT ?? "4511"), 10);
+  const send = argValue(args, ["--send"], null);
+  const listen = args.includes("--listen");
+  const timeoutMs = parseInt(argValue(args, ["--timeout-ms"], "180000"), 10);
+
+  const client = new ChannelClient({ proxyPort, log });
+  await client.connect();
+  log(`connected to daemon proxy ws://127.0.0.1:${proxyPort}`);
+  await client.initialize();
+  log("initialize ok");
+
+  if (send) {
+    log(`sending ${send.length} chars to codex side...`);
+    const msg = await client.sendMessage(send, { timeoutMs });
+    console.log(JSON.stringify({ ok: true, threadId: msg.threadId, turnId: msg.turnId, reply: msg.text }));
+    client.close();
+    return 0;
+  }
+  if (listen) {
+    log("listening for replies (Ctrl-C to stop)");
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const msgs = client.drainInbound();
+      for (const m of msgs) {
+        console.log(JSON.stringify({ threadId: m.threadId, turnId: m.turnId, text: m.text }));
+      }
+      if (msgs.length === 0) await new Promise((r) => setTimeout(r, 300));
+    }
+    client.close();
+    return 0;
+  }
+  log("nothing to do: pass --send or --listen");
+  client.close();
+  return 1;
+}
+
+async function cmdServer(args) {
+  const port = parseInt(argValue(args, ["--port"], process.env.ABG_APP_PORT ?? "4510"), 10);
+  const mock = args.includes("--mock");
+  const server = new DshAppServer({ port, mock, log });
+  await server.start();
+  log(`app-server ready on ws://127.0.0.1:${port} (mock=${mock}); waiting for daemon...`);
+  process.on("SIGINT", () => {
+    server.stop();
+    process.exit(0);
+  });
+  await new Promise(() => {});
+}
+
+// Default engine: attach (DSH as the pair's claude-side seat — messages land
+// in the codex thread the TUI shows). Falls back to the secondary channel
+// when attach is impossible (no control token / seat occupied).
+async function makeEngine(pair, args, log) {
+  const wantChannel = args.includes("--channel");
+  if (!wantChannel) {
+    try {
+      const identity = identityForPair(pair.name);
+      const client = new ControlClient({ controlPort: pair.ports.controlPort, identity, log });
+      await client.connect();
+      const status = await client.attach();
+      log(`attach: DSH 已接管 ${pair.name} 的 claude 席位 (thread=${status.threadId ?? "none"}, bridgeReady=${status.bridgeReady})`);
+      return { mode: "attach", engine: client };
+    } catch (e) {
+      log(`attach 不可用（${e.message}），回退 channel 模式`);
+    }
+  }
+  const proxyPort = parseInt(argValue(args, ["--proxy-port"], String(pair.ports.proxyPort)), 10);
+  const client = new ChannelClient({ proxyPort, log });
+  await client.connect();
+  await client.initialize();
+  log(`channel: connected via proxy ws://127.0.0.1:${proxyPort}`);
+  return { mode: "channel", engine: client };
+}
+
+async function cmdDaemonMcp(args) {
+  const httpPort = parseInt(argValue(args, ["--http-port"], String(DEFAULT_MCP_PORT)), 10);
+  if (!argValue(args, ["--pair"], process.env.ABG_PAIR_NAME ?? null)) {
+    log("必须显式指定 pair：abg dsh --pair NAME");
+    return 1;
+  }
+  const pair = discoverPair(args);
+  const { mode, engine } = await makeEngine(pair, args, log);
+  const mcp = new McpServer({ mode, engine, log, claudeCwd: pair.cwd });
+  const srv = await serveHttp(mcp, httpPort);
+  log(`MCP ready: http://127.0.0.1:${srv.port}/mcp (mode=${mode}, Ctrl-C to stop)`);
+  process.on("SIGINT", () => {
+    srv.stop(true);
+    process.exit(0);
+  });
+  await new Promise(() => {});
+}
+
+async function cmdMcp(args) {
+  const mode = argValue(args, ["--mode"], "channel");
+  const httpPort = parseInt(argValue(args, ["--http-port"], "0"), 10);
+  const stdio = args.includes("--stdio");
+  const proxyPort = parseInt(argValue(args, ["--proxy-port"], process.env.ABG_PROXY_PORT ?? "4511"), 10);
+  const appPort = parseInt(argValue(args, ["--app-port"], process.env.ABG_APP_PORT ?? "4510"), 10);
+
+  let engine;
+  if (mode === "channel") {
+    engine = new ChannelClient({ proxyPort, log });
+    await engine.connect();
+    await engine.initialize();
+    log(`channel mode: connected to proxy ws://127.0.0.1:${proxyPort}`);
+  } else if (mode === "server") {
+    engine = new DshAppServer({ port: appPort, mock: false, log });
+    await engine.start();
+    log(`server mode: app-server on ws://127.0.0.1:${appPort}, waiting for daemon`);
+  } else {
+    log(`unknown mode: ${mode} (use channel|server)`);
+    return 1;
+  }
+
+  const mcp = new McpServer({ mode, engine, log, claudeCwd: process.env.ABG_PAIR_CWD || null });
+  if (stdio) {
+    await serveStdio(mcp);
+    await new Promise(() => {});
+  } else {
+    const server = await serveHttp(mcp, httpPort);
+    log(`MCP streamable-http: http://127.0.0.1:${server.port}/mcp (mode=${mode})`);
+    process.on("SIGINT", () => {
+      server.stop(true);
+      process.exit(0);
+    });
+    await new Promise(() => {});
+  }
+  return 0;
+}
+
+// attach mode: DSH as the pair's "claude side" — messages land in the same
+// codex thread the TUI shows, and codex replies come back to us.
+async function cmdAttach(args) {
+  const pairName = argValue(args, ["--pair"], process.env.ABG_PAIR_NAME ?? null);
+  if (!pairName) {
+    log("必须显式指定 pair：abg dsh attach --pair NAME");
+    return 1;
+  }
+  const send = argValue(args, ["--send"], null);
+  const listen = args.includes("--listen");
+  const identity = identityForPair(pairName);
+  const pair = JSON.parse(
+    (await import("node:fs")).readFileSync(join(STATE_DIR, "pairs/registry.json"), "utf8")
+  ).pairs.find((p) => p.name === pairName);
+  const controlPort = pairPortsOf(pair).controlPort;
+  const client = new ControlClient({ controlPort, identity, log });
+  await client.connect();
+  const status = await client.attach();
+  log(`attached to ${pairName} (pair=${identity.pairId}, cwd=${identity.cwd})`);
+  log(`daemon: bridgeReady=${status.bridgeReady} tuiConnected=${status.tuiConnected} thread=${status.threadId ?? "none"}`);
+
+  if (send) {
+    log(`注入 ${send.length} 字符到 codex 主 thread...`);
+    const reply = await client.sendMessage(send, { timeoutMs: 240000 });
+    console.log(JSON.stringify({ ok: true, reply }));
+    client.ws?.close();
+    return 0;
+  }
+  if (listen) {
+    log("监听 codex 回复（Ctrl-C 停）");
+    process.on("SIGINT", () => process.exit(0));
+    while (true) {
+      const msgs = client.inbound.splice(0);
+      for (const m of msgs) {
+        console.log(JSON.stringify({ id: m.id, content: m.content }));
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+  log("nothing to do: pass --send or --listen");
+  client.ws?.close();
+  return 1;
+}
+
+async function cmdWatch(args) {
+  const pairName = argValue(args, ["--pair"], process.env.ABG_PAIR_NAME ?? null);
+  if (!pairName) {
+    log("必须显式指定 pair：abg dsh watch --pair NAME");
+    return 1;
+  }
+  const lines = parseInt(argValue(args, ["--lines"], "10"), 10);
+  const follow = args.includes("--follow") || args.includes("-f");
+  const since = argValue(args, ["--since"], null);
+  return await watchPair(pairName, { lines, follow, since });
+}
+
+async function cmdDoctor(args) {
+  let ports;
+  try {
+    ports = discoverPair(args).ports;
+  } catch {
+    ports = {
+      appPort: parseInt(argValue(args, ["--app-port"], process.env.ABG_APP_PORT ?? "4510"), 10),
+      proxyPort: parseInt(argValue(args, ["--proxy-port"], process.env.ABG_PROXY_PORT ?? "4511"), 10),
+      controlPort: parseInt(argValue(args, ["--control-port"], process.env.ABG_CONTROL_PORT ?? "4512"), 10),
+    };
+  }
+  const check = async (name, url) => {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(2000) });
+      const body = await res.text();
+      console.log(`  ${name}: ${res.status} ${body.slice(0, 60)}`);
+      return true;
+    } catch (e) {
+      console.log(`  ${name}: unreachable (${e.message})`);
+      return false;
+    }
+  };
+  console.log("pair status:");
+  await check("app-server ", `http://127.0.0.1:${ports.appPort}/healthz`);
+  await check("proxy      ", `http://127.0.0.1:${ports.proxyPort}/`);
+  await check("control    ", `http://127.0.0.1:${ports.controlPort}/healthz`);
+  return 0;
+}
+
+// ── dispatch ──────────────────────────────────────────────────────────────
+
+const [cmd, ...rest] = process.argv.slice(2);
+
+// `abg --pair X dsh` comes in as args with dsh NOT first; find it.
+const dshIdx = process.argv.slice(2).indexOf("dsh");
+const isDshInvocation = dshIdx >= 0;
+
+if (isDshInvocation) {
+  const args = process.argv.slice(2);
+  args.splice(dshIdx, 1); // drop the literal "dsh"
+  const sub = args[0];
+  if (sub === "daemon-mcp") process.exit(await cmdDaemonMcp(args.slice(1)));
+  if (sub === "attach") process.exit(await cmdAttach(args.slice(1)));
+  if (sub === "watch") process.exit(await cmdWatch(args.slice(1)));
+  if (sub === "channel") process.exit(await cmdChannel(args.slice(1)));
+  if (sub === "server") process.exit(await cmdServer(args.slice(1)));
+  if (sub === "doctor") process.exit(await cmdDoctor(args.slice(1)));
+  if (sub === "stub") {
+    const code = codexStubMain([process.argv[0], process.argv[1], ...args.slice(1)]);
+    if (typeof code === "number") process.exit(code);
+    await new Promise(() => {});
+  }
+  if (sub === "--help" || sub === "-h") {
+    usage();
+    process.exit(0);
+  }
+  process.exit(await cmdStart(args));
+}
+
+switch (cmd) {
+  case "attach":
+    process.exit(await cmdAttach(rest));
+  case "watch":
+    process.exit(await cmdWatch(rest));
+  case "daemon-mcp":
+    process.exit(await cmdDaemonMcp(rest));
+  case "channel":
+    process.exit(await cmdChannel(rest));
+  case "server":
+    process.exit(await cmdServer(rest));
+  case "mcp":
+    process.exit(await cmdMcp(rest));
+  case "doctor":
+    process.exit(await cmdDoctor(rest));
+  case "stub": {
+    const code = codexStubMain(process.argv);
+    if (typeof code === "number") process.exit(code);
+    await new Promise(() => {});
+  }
+  case "--help":
+  case "-h":
+  case undefined:
+    usage();
+    process.exit(0);
+  default:
+    usage();
+    process.exit(1);
+}
