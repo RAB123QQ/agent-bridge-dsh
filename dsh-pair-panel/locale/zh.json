@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "对端面板",
+    "description": "agentbridge 的 Codex / Claude 对端面板，显示实时上下文用量与消息流。"
+  }
+}

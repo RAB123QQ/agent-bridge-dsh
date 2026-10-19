@@ -9,7 +9,7 @@ window.__ModuleLoader__.load({
 		var POLL_MS = 2500;
 		var ENABLED_KEY = "dsh-pair-panel-enabled";
 
-		var runtime = { dsh: null, snapshot: null, error: null, panel: null, cards: {}, launches: {}, listeners: [], enabled: true, pairSel: "", disposed: false };
+		var runtime = { dsh: null, snapshot: null, error: null, panel: null, cardsBox: null, handle: null, cards: {}, launches: {}, listeners: [], enabled: true, pairSel: "", sessionId: "", disposed: false };
 		try { runtime.enabled = window.localStorage.getItem(ENABLED_KEY) !== "0"; } catch (error) {}
 
 		var CSS = `
@@ -25,50 +25,99 @@ body[data-dsh-maid-atelier] :is([data-pane='sidebar'], [class*='sidebarCol']) > 
   transform: none !important;
   filter: none !important;
 }
-.pp-panels { position:fixed; top:76px; right:0; bottom:164px; display:none; gap:8px; z-index:0; pointer-events:none; }
+/* Docked right peer rail — same visual language as the left sidebar:
+   flat surface, thin divider, full height, no floating card/shadow. */
+.pp-panels {
+  position:fixed;
+  /* Flush to the top like the left sidebar: the conversation column already
+     reserves the rail width, so the rail fills the full height instead of
+     leaving an empty strip above it. */
+  top:var(--dsh-windows-titlebar-height,0px);
+  right:0;
+  bottom:0;
+  width:clamp(300px, 26vw, 420px);
+  display:none;
+  flex-direction:column;
+  background:var(--dsw-alias-bg-layer-1);
+  border-left:1px solid var(--dsw-alias-border-l1);
+  color:var(--dsw-alias-label-primary);
+  font:13px/1.5 ui-sans-serif,system-ui,'PingFang SC','Microsoft YaHei',sans-serif;
+  z-index:2;
+  pointer-events:auto;
+}
 body[data-pair-panel-mode='abg'] .pp-panels { display:flex; }
-.pp-card { flex:1 1 0; min-width:0; min-height:0; display:flex; flex-direction:column; background:var(--dsw-alias-bg-layer-2); color:var(--dsw-alias-label-primary); border:1px solid var(--dsw-alias-border-l1); border-radius:12px; box-shadow:0 10px 40px rgba(0,0,0,.16), 0 2px 10px rgba(0,0,0,.07); pointer-events:auto; overflow:hidden; font:13px/1.5 ui-sans-serif,system-ui,'PingFang SC','Microsoft YaHei',sans-serif; }
-.pp-toggle { display:inline-flex; align-items:center; gap:6px; height:28px; padding:0 8px; border:1px solid var(--dsw-alias-border-l2); border-radius:6px; background:var(--dsw-alias-bg-layer-2); color:var(--dsw-alias-label-primary); font:12px/1 ui-sans-serif,system-ui,sans-serif; cursor:pointer; }
-.pp-toggle:hover { border-color:var(--dsw-alias-border-l3); background:var(--dsw-alias-interactive-bg-hover); }
-.pp-toggle-dot { width:8px; height:8px; border-radius:50%; background:var(--dsw-alias-label-tertiary); }
-.pp-actions { margin-left:auto; display:flex; align-items:center; gap:6px; flex:none; }
-.pp-launch { min-width:66px; height:24px; display:inline-flex; align-items:center; justify-content:center; gap:5px; border:1px solid var(--dsw-alias-border-l2); border-radius:6px; background:var(--dsw-alias-bg-layer-2); color:var(--dsw-alias-label-secondary); font:11px/1 ui-sans-serif,system-ui,sans-serif; padding:0 8px; cursor:pointer; flex:none; transition:border-color .15s ease,color .15s ease,background .15s ease; }
-.pp-launch:hover:not(:disabled) { border-color:var(--dsw-alias-border-l3); background:var(--dsw-alias-interactive-bg-hover); color:var(--dsw-alias-label-primary); }
-.pp-launch:disabled { cursor:default; }
-.pp-launch.starting { color:var(--dsw-alias-state-warn-primary); border-color:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 45%, transparent); background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 10%, transparent); cursor:progress; }
-.pp-launch.success { color:var(--dsw-alias-state-success-primary); border-color:color-mix(in srgb, var(--dsw-alias-state-success-primary) 45%, transparent); background:color-mix(in srgb, var(--dsw-alias-state-success-primary) 10%, transparent); }
-.pp-launch.error { color:var(--dsw-alias-state-error-primary); border-color:color-mix(in srgb, var(--dsw-alias-state-error-primary) 45%, transparent); background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, transparent); }
-.pp-launch-new { color:var(--dsw-alias-label-secondary); border-color:var(--dsw-alias-border-l2); margin-left:4px; min-width:26px; padding:3px 6px; }
-.pp-launch-new:disabled { opacity:.5; cursor:default; }
+.pp-card { flex:1 1 0; min-width:0; min-height:0; display:flex; flex-direction:column; background:transparent; border:0; border-radius:0; box-shadow:none; overflow:hidden; }
+.pp-card + .pp-card { border-top:1px solid var(--dsw-alias-border-l1); }
+.pp-toggle { display:inline-flex; align-items:center; justify-content:center; width:26px; height:26px; padding:0; border:0; border-radius:6px; background:transparent; color:var(--dsw-alias-label-secondary); font:12px/1 ui-sans-serif,system-ui,sans-serif; cursor:pointer; flex:none; margin-left:2px; }
+.pp-toggle[aria-checked='true'] { color:var(--dsw-alias-label-primary); }
+.pp-toggle:hover { background:var(--dsw-alias-interactive-bg-hover); color:var(--dsw-alias-label-primary); }
+.pp-toggle-dot { width:7px; height:7px; border-radius:50%; background:var(--dsw-alias-label-tertiary); }
+.pp-actions { margin-left:auto; display:flex; align-items:center; gap:2px; flex:none; }
+.pp-launch { min-width:0; height:24px; display:inline-flex; align-items:center; justify-content:center; gap:4px; border:0; border-radius:6px; background:transparent; color:var(--dsw-alias-label-secondary); font:12px/1 ui-sans-serif,system-ui,sans-serif; padding:0 6px; cursor:pointer; flex:none; transition:background .15s ease,color .15s ease; }
+.pp-launch:hover:not(:disabled) { background:var(--dsw-alias-interactive-bg-hover); color:var(--dsw-alias-label-primary); }
+.pp-launch:disabled { cursor:default; opacity:.6; }
+.pp-launch.starting { color:var(--dsw-alias-state-warn-primary); background:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 10%, transparent); cursor:progress; }
+.pp-launch.success { color:var(--dsw-alias-state-success-primary); background:color-mix(in srgb, var(--dsw-alias-state-success-primary) 10%, transparent); }
+.pp-launch.error { color:var(--dsw-alias-state-error-primary); background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, transparent); }
+.pp-launch-new { margin-left:0; min-width:24px; padding:0 6px; }
+.pp-launch-new:disabled { opacity:.4; cursor:default; }
 .pp-launch.starting .pp-launch-icon { animation:pp-spin .9s linear infinite; }
 @keyframes pp-spin { to { transform:rotate(360deg); } }
 .pp-toggle[aria-checked='true'] .pp-toggle-dot { background:var(--dsw-alias-state-success-primary); box-shadow:0 0 0 2px color-mix(in srgb, var(--dsw-alias-state-success-primary) 25%, transparent); }
-.pp-head { display:flex; align-items:center; gap:8px; padding:9px 12px; flex:none; background:var(--dsw-alias-bg-layer-1); border-bottom:1px solid var(--dsw-alias-border-l1); }
-.pp-title { font-weight:600; color:var(--dsw-alias-label-primary); letter-spacing:0; font-size:13px; }
+.pp-head { display:flex; align-items:center; gap:6px; padding:10px 12px 6px; flex:none; background:transparent; border-bottom:0; }
+.pp-title { font-weight:600; color:var(--dsw-alias-label-primary); letter-spacing:0; font-size:13px; flex:none; }
 .pp-sub { color:var(--dsw-alias-label-tertiary); font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
-.pp-chip { padding:1px 8px; border-radius:999px; font-size:11px; flex:none; border:1px solid var(--dsw-alias-border-l2); color:var(--dsw-alias-label-secondary); background:var(--dsw-alias-bg-layer-1); }
-.pp-chip.running { color:var(--dsw-alias-state-success-primary); border-color:color-mix(in srgb, var(--dsw-alias-state-success-primary) 45%, transparent); background:color-mix(in srgb, var(--dsw-alias-state-success-primary) 10%, transparent); animation:pp-pulse 1.6s ease-in-out infinite; }
+.pp-chip { padding:0 6px; border-radius:4px; font-size:10px; flex:none; border:0; color:var(--dsw-alias-label-tertiary); background:transparent; }
+.pp-chip.running { color:var(--dsw-alias-state-success-primary); background:color-mix(in srgb, var(--dsw-alias-state-success-primary) 12%, transparent); animation:pp-pulse 1.6s ease-in-out infinite; }
 @keyframes pp-pulse { 0%,100%{opacity:1} 50%{opacity:.55} }
-.pp-ctx { flex:none; padding:9px 12px; border-bottom:1px solid var(--dsw-alias-border-l1); display:flex; flex-direction:column; gap:8px; background:var(--dsw-alias-bg-layer-1); }
-.pp-gauge { display:flex; flex-direction:column; gap:3px; }
+.pp-ctx { flex:none; padding:2px 12px 8px; border-bottom:0; display:flex; flex-direction:column; gap:5px; background:transparent; }
+.pp-gauge { display:flex; flex-direction:column; gap:2px; }
 .pp-gauge-row { display:flex; justify-content:space-between; gap:12px; font-size:11px; color:var(--dsw-alias-label-tertiary); }
-.pp-gauge-row b { color:var(--dsw-alias-label-primary); font-weight:600; text-align:right; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; max-width:72%; }
-.pp-bar { height:6px; border-radius:3px; background:var(--dsw-alias-border-l2); overflow:hidden; }
-.pp-bar>i { display:block; height:100%; border-radius:3px; background:var(--dsw-alias-brand-primary); transition:width .4s ease; }
+.pp-gauge-row b { color:var(--dsw-alias-label-secondary); font-weight:500; text-align:right; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; max-width:72%; }
+.pp-bar { height:4px; border-radius:2px; background:var(--dsw-alias-border-l1); overflow:hidden; }
+.pp-bar>i { display:block; height:100%; border-radius:2px; background:var(--dsw-alias-brand-primary); transition:width .4s ease; }
 .pp-bar>i.warn { background:var(--dsw-alias-state-warn-primary); }
-.pp-feed { flex:1; min-height:0; overflow-y:auto; padding:9px 10px 12px; display:flex; flex-direction:column; gap:6px; background:var(--dsw-alias-bg-layer-2); scrollbar-width:thin; scrollbar-color:var(--dsw-alias-scrollbar-bg-l2) transparent; }
+.pp-feed { flex:1; min-height:0; overflow-y:auto; overflow-anchor:none; padding:4px 8px 10px; display:flex; flex-direction:column; gap:2px; background:transparent; scrollbar-width:thin; scrollbar-color:var(--dsw-alias-scrollbar-bg-l2) transparent; }
 .pp-feed > * { flex:none; } /* flex column would squash rows instead of overflowing; pin their height so the feed really scrolls */
-.pp-msg { border-radius:8px; padding:6px 10px; max-width:92%; white-space:pre-wrap; word-break:break-word; font-size:12px; }
-.pp-msg.user { align-self:flex-end; background:var(--dsw-alias-interactive-bg-hover-accent); border:1px solid var(--dsw-alias-border-l2); }
-.pp-msg.assistant { align-self:flex-start; background:var(--dsw-alias-bg-layer-1); border:1px solid var(--dsw-alias-border-l1); }
-.pp-tool { align-self:flex-start; font:11px/1.5 ui-monospace,monospace; color:var(--dsw-alias-label-secondary); background:var(--dsw-alias-markdown-code-block); border:1px dashed var(--dsw-alias-border-l2); border-radius:6px; padding:3px 8px; max-width:100%; word-break:break-all; }
-.pp-task { align-self:center; color:var(--dsw-alias-label-tertiary); font-size:11px; }
+.pp-msg { border-radius:6px; padding:5px 8px; max-width:none; white-space:pre-wrap; word-break:break-word; font-size:12px; }
+.pp-msg.user { align-self:stretch; background:var(--dsw-alias-interactive-bg-hover); border:0; }
+.pp-msg.assistant { align-self:stretch; background:transparent; border:0; color:var(--dsw-alias-label-primary); }
+.pp-tool { align-self:stretch; font:11px/1.5 ui-monospace,monospace; color:var(--dsw-alias-label-secondary); background:var(--dsw-alias-bg-layer-2); border:0; border-radius:6px; padding:4px 8px; max-width:100%; word-break:break-all; }
+.pp-task { align-self:stretch; color:var(--dsw-alias-label-tertiary); font-size:11px; padding:2px 8px; }
 .pp-time { color:var(--dsw-alias-label-tertiary); font-size:10px; margin-left:6px; }
-.pp-empty { color:var(--dsw-alias-label-tertiary); font-size:12px; text-align:center; padding:20px 0; }
-.pp-foot { flex:none; padding:6px 12px; font-size:10px; color:var(--dsw-alias-label-tertiary); border-top:1px solid var(--dsw-alias-border-l1); background:var(--dsw-alias-bg-layer-2); }
+.pp-empty { color:var(--dsw-alias-label-tertiary); font-size:12px; text-align:center; padding:24px 12px; }
+@media (max-width:1180px) {
+  .pp-sub { display:none; }
+  .pp-chip { display:none; }
+  .pp-launch { font-size:11px; padding:0 4px; }
+}
+@media (max-width:1000px) {
+  .pp-panels { width:280px; }
+  .pp-head { padding:8px 10px 4px; gap:4px; }
+  .pp-ctx { padding:0 10px 6px; }
+  .pp-feed { padding:2px 6px 8px; }
+  .pp-foot { padding:6px 10px; }
+}
+.pp-foot { flex:none; padding:8px 12px; font-size:10px; color:var(--dsw-alias-label-tertiary); border-top:1px solid var(--dsw-alias-border-l1); background:transparent; }
 .pp-foot.launch-starting { color:var(--dsw-alias-state-warn-primary); }
 .pp-foot.launch-success { color:var(--dsw-alias-state-success-primary); }
 .pp-foot.launch-error { color:var(--dsw-alias-state-error-primary); }
+.pp-railhead { display:flex; align-items:center; gap:6px; padding:10px 12px 6px; flex:none; }
+.pp-railtitle { font-weight:600; font-size:13px; color:var(--dsw-alias-label-primary); }
+.pp-cards { flex:1 1 auto; min-height:0; display:flex; flex-direction:column; }
+.pp-md { white-space:normal; }
+.pp-md p { margin:0 0 6px; }
+.pp-md p:last-child { margin-bottom:0; }
+.pp-md h3,.pp-md h4,.pp-md h5,.pp-md h6 { margin:8px 0 4px; font-size:13px; font-weight:600; line-height:1.4; }
+.pp-md ul,.pp-md ol { margin:2px 0 6px; padding-left:18px; }
+.pp-md li { margin:1px 0; }
+.pp-md pre { margin:4px 0 6px; padding:6px 8px; border-radius:6px; background:var(--dsw-alias-markdown-code-block,var(--dsw-alias-bg-layer-2)); overflow:auto; font:11px/1.55 ui-monospace,SFMono-Regular,Consolas,'Courier New',monospace; }
+.pp-md code { font:11px/1.55 ui-monospace,SFMono-Regular,Consolas,'Courier New',monospace; background:var(--dsw-alias-bg-layer-2); border-radius:4px; padding:1px 4px; }
+.pp-md pre code { background:transparent; padding:0; }
+.pp-md a { color:var(--dsw-alias-brand-primary); text-decoration:underline; }
+.pp-md blockquote { margin:4px 0 6px; padding:2px 8px; border-left:2px solid var(--dsw-alias-border-l2); color:var(--dsw-alias-label-secondary); }
+.pp-md hr { border:0; border-top:1px solid var(--dsw-alias-border-l1); margin:8px 0; }
+.pp-md strong { font-weight:600; }
 `;
 
 		function notify() { for (var i = 0; i < runtime.listeners.length; i++) { try { runtime.listeners[i](); } catch (error) {} } }
@@ -76,26 +125,28 @@ body[data-pair-panel-mode='abg'] .pp-panels { display:flex; }
 		function isAbg() { return !!(runtime.snapshot && runtime.snapshot.ok && (runtime.snapshot.mode === "abg" || runtime.snapshot.mode === "plain")); }
 		function loadSnapshot() {
 			if (runtime.disposed) return;
-			fetch("/pair-panel/snapshot?pair=" + encodeURIComponent(runtime.pairSel || ""), { cache:"no-store" })
+			// Forward the session id captured from the header slot so the host
+			// can resolve the live Session (token meter / context window). DSH
+			// 0.2.x routes have no initiator boundary, so without this the host
+			// only sees the workspace fallback.
+			var sessionQuery = runtime.sessionId ? "&session=" + encodeURIComponent(runtime.sessionId) : "";
+			fetch("/pair-panel/snapshot?pair=" + encodeURIComponent(runtime.pairSel || "") + sessionQuery, { cache:"no-store" })
 				.then(function (response) { if (!response.ok) throw new Error("snapshot HTTP " + response.status); return response.json(); })
 				.then(function (data) { if (runtime.disposed) return; runtime.snapshot = data; runtime.error = null; renderPanel(); notify(); })
-				.catch(function (error) { if (runtime.disposed) return; runtime.snapshot = null; runtime.error = String((error && error.message) || error); renderPanel(); notify(); });
+				.catch(function (error) { if (runtime.disposed) return; runtime.error = String((error && error.message) || error); renderPanel(); notify(); });
 		}
 
-		// The right maid stays at the viewport edge untouched. The panel is
-		// positioned to her left, flush against the conversation column, so the
-		// two never overlap. All values are measured at runtime; if the maid is
-		// not ready yet we do NOT shift anything (avoids pushing the column
-		// left with a wrong estimate).
-		var LAYOUT_GAP = 12;
+		// The peer rail is docked to the right edge, styled like the left
+		// sidebar: one flat full-height column instead of a floating card. The
+		// layout pass only reserves its width for the conversation column and
+		// steps to the left of the official right sidebar when that is open.
+		var LAYOUT_GAP = 0;
 		var PANELS_GAP = 8;
-		var WHALE_GAP = 16;
-		var PANEL_SHIFT = 110; // extra leftward offset for panel + conversation
 		var layoutApplied = false;
 		var leftMaidTouched = false;
 
-		// The left maid keeps her skin position (standing right of the
-		// sidebar) but is shrunk so conversation bubbles never cover her.
+		// The left maid keeps her skin position; the docked rail does not touch
+		// her, so this is only kept for skin-era restore symmetry.
 		function adjustLeftMaid() {
 			var maid = document.querySelector("[data-maid-character='left']");
 			if (!maid) return;
@@ -118,71 +169,25 @@ body[data-pair-panel-mode='abg'] .pp-panels { display:flex; }
 
 		function layoutPanel() {
 			if (!isAbg() || !runtime.enabled) { layoutApplied = false; return; }
-			var viewport = document.documentElement.clientWidth || window.innerWidth;
-			var whale = document.querySelector("[data-maid-character='right']");
-			if (whale && whale.tagName === "IMG" && !whale.complete && !runtime.whaleLoadPending) {
-				runtime.whaleLoadPending = true;
-				whale.addEventListener("load", function () { runtime.whaleLoadPending = false; if (isAbg() && runtime.enabled) layoutPanel(); }, { once: true });
-			}
-			// Without the maid-atelier skin there is no whale to anchor to;
-			// fall back to a fixed right-side reserve so the panel still sits
-			// beside the conversation. With the skin, anchor to the real maid.
-			var whaleLeft = whale ? whale.getBoundingClientRect().left : 0;
-			if (!whale) {
-				whaleLeft = viewport + WHALE_GAP; // no skin: panel flush to the viewport right edge
-			} else if (!isFinite(whaleLeft) || whaleLeft <= 0 || whaleLeft > viewport * 0.98) {
-				// maid not laid out yet: keep the original layout untouched
-				return;
-			}
-			// The DSH conversation content is centered inside its column with
-			// side padding, so the column edge is NOT where the chat ends. The
-			// panel is anchored to the right maid; the column margin is solved
-			// so the input's right edge lands exactly LAYOUT_GAP left of the
-			// panel. No iteration on the current content position, so no
-			// fixed-point trap.
-			var input = document.querySelector('textarea, [contenteditable="true"]');
-			var inputWidth = 0;
-			if (input) {
-				var ir = input.getBoundingClientRect();
-				if (isFinite(ir.width) && ir.width > 0) inputWidth = ir.width;
-			}
-			// Panel bottom is a fixed offset from the viewport (see .pp-card
-			// CSS) and does NOT track the DSH composer, so it never jumps when
-			// the input box grows or shrinks.
-			var convEl = document.querySelector("[class*='centerCol']");
-			var convLeft = convEl ? convEl.getBoundingClientRect().left : 0;
-			if (!isFinite(convLeft) || convLeft <= 0) convLeft = 280;
-			// The wrapper owns positioning. A dual peer reserves two card widths
-			// plus the inter-card gap; a single peer keeps the original 448px aim.
-			var dual = !!(runtime.snapshot && runtime.snapshot.peer === "both");
-			var cardCount = dual ? 2 : 1;
-			var panelsGap = dual ? PANELS_GAP : 0;
-			var desiredWidth = (dual ? 380 : 448) * cardCount + panelsGap;
-			var minWidth = (dual ? 260 : 240) * cardCount + panelsGap;
-			var availableWidth = whaleLeft - WHALE_GAP - convLeft - inputWidth - LAYOUT_GAP;
-			var panelWidth = Math.min(desiredWidth, Math.max(minWidth, availableWidth));
-			// wrapper left is anchored to the right maid, with a small extra
-			// leftward shift for the panel + conversation pair
-			var panelLeft = Math.max(0, whaleLeft - WHALE_GAP - panelWidth - (whale ? PANEL_SHIFT : 0));
-			// solve the column margin so the centered input lands flush:
-			// inputRight = convLeft + (colWidth + inputWidth)/2 = panelLeft - LAYOUT_GAP
-			// with colWidth = viewport - convLeft - margin
-			var convMargin = viewport - panelLeft;
-			if (!whale) {
-				// no skin: keep the conversation column clear of the panel so
-				// the composer / floating buttons never sit under it
-				convMargin = panelWidth + WHALE_GAP + LAYOUT_GAP;
-			} else if (inputWidth > 0) {
-				convMargin = viewport + convLeft + inputWidth - 2 * panelLeft + 2 * LAYOUT_GAP;
-				convMargin = Math.max(0, convMargin);
-			}
-			var right = Math.max(0, viewport - panelLeft - panelWidth);
 			var panel = runtime.panel;
-			if (panel && panel.style.right !== right + "px") panel.style.right = right + "px";
-			if (panel && panel.style.width !== panelWidth + "px") panel.style.width = panelWidth + "px";
+			if (!panel) return;
+			// DSH 0.2.x lays the app out as a three-column CSS grid with a real
+			// right sidebar track ([data-rightbar-col]). When that track is open,
+			// dock the rail immediately to its left instead of covering it.
+			var rightbarEl = document.querySelector("[data-rightbar-col]");
+			var rightbarWidth = 0;
+			if (rightbarEl) {
+				var rbRect = rightbarEl.getBoundingClientRect();
+				if (isFinite(rbRect.width) && rbRect.width > 0) rightbarWidth = rbRect.width;
+			}
+			var right = rightbarWidth > 0 ? rightbarWidth + "px" : "0px";
+			if (panel.style.right !== right) panel.style.right = right;
+			// Reserve the rail width inside the conversation column so the
+			// composer / chat content is never hidden under it.
+			var rect = panel.getBoundingClientRect();
+			var railWidth = rect && isFinite(rect.width) && rect.width > 0 ? rect.width : 360;
 			var conv = document.querySelector("[class*='centerCol']");
-			if (conv && conv.style.marginRight !== convMargin + "px") conv.style.marginRight = convMargin + "px";
-			adjustLeftMaid();
+			if (conv && conv.style.marginRight !== railWidth + "px") conv.style.marginRight = railWidth + "px";
 			layoutApplied = true;
 		}
 		function clearLayout() {
@@ -205,11 +210,98 @@ body[data-pair-panel-mode='abg'] .pp-panels { display:flex; }
 			if (item.kind === "tool-out") return "result: " + (item.text || "");
 			return (item.text || item.kind || "event") + (item.ts ? " · " + fmtTime(item.ts) : "");
 		}
+		// Lightweight, dependency-free markdown rendering for peer messages.
+		// Everything is built as DOM nodes so peer text cannot inject markup.
+		// Supported: fenced code, headings, lists, blockquote, hr, inline code,
+		// bold/italic/strike, links, and hard line breaks.
+		function mdInline(target, text) {
+			var re = /(`[^`]+`|\*\*[^*]+\*\*|__[^_]+__|\*[^*\n]+\*|~~[^~]+~~|\[[^\]]+\]\((https?:\/\/[^)\s]+)\))/g;
+			var last = 0, m;
+			while ((m = re.exec(text))) {
+				if (m.index > last) target.appendChild(document.createTextNode(text.slice(last, m.index)));
+				var tok = m[0], el;
+				if (tok.charAt(0) === "`") { el = document.createElement("code"); el.textContent = tok.slice(1, -1); }
+				else if (tok.indexOf("**") === 0 || tok.indexOf("__") === 0) { el = document.createElement("strong"); el.textContent = tok.slice(2, -2); }
+				else if (tok.indexOf("~~") === 0) { el = document.createElement("del"); el.textContent = tok.slice(2, -2); }
+				else if (tok.charAt(0) === "[") {
+					var link = /^\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)$/.exec(tok);
+					el = document.createElement("a"); el.textContent = link[1]; el.href = link[2]; el.target = "_blank"; el.rel = "noopener noreferrer";
+				}
+				else { el = document.createElement("em"); el.textContent = tok.slice(1, -1); }
+				target.appendChild(el);
+				last = m.index + tok.length;
+			}
+			if (last < text.length) target.appendChild(document.createTextNode(text.slice(last)));
+		}
+		function mdTextBlock(target, lines) {
+			for (var i = 0; i < lines.length; i++) {
+				if (i > 0) target.appendChild(document.createElement("br"));
+				mdInline(target, lines[i]);
+			}
+		}
+		function renderMarkdown(root, text) {
+			root.replaceChildren();
+			var lines = String(text == null ? "" : text).replace(/\r\n?/g, "\n").split("\n");
+			var i = 0;
+			while (i < lines.length) {
+				var line = lines[i];
+				var fence = /^\s*```([\w+#.-]*)\s*$/.exec(line);
+				if (fence) {
+					i++;
+					var codeLines = [];
+					while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) { codeLines.push(lines[i]); i++; }
+					if (i < lines.length) i++;
+					var pre = document.createElement("pre");
+					var code = document.createElement("code");
+					code.textContent = codeLines.join("\n");
+					pre.appendChild(code); root.appendChild(pre); continue;
+				}
+				if (!line.trim()) { i++; continue; }
+				var h = /^(#{1,6})\s+(.*)$/.exec(line);
+				if (h) {
+					var level = Math.min(6, h[1].length + 2);
+					var heading = document.createElement("h" + level);
+					mdInline(heading, h[2]);
+					root.appendChild(heading); i++; continue;
+				}
+				if (/^\s*([-*_])\1{2,}\s*$/.test(line)) { root.appendChild(document.createElement("hr")); i++; continue; }
+				if (/^\s*>\s?/.test(line)) {
+					var bq = document.createElement("blockquote");
+					var quoted = [];
+					while (i < lines.length && /^\s*>\s?/.test(lines[i])) { quoted.push(lines[i].replace(/^\s*>\s?/, "")); i++; }
+					mdTextBlock(bq, quoted); root.appendChild(bq); continue;
+				}
+				var listMatch = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/.exec(line);
+				if (listMatch) {
+					var ordered = /\d/.test(listMatch[2]);
+					var list = document.createElement(ordered ? "ol" : "ul");
+					while (i < lines.length) {
+						var item = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/.exec(lines[i]);
+						if (!item) break;
+						var li = document.createElement("li");
+						mdInline(li, item[3]);
+						list.appendChild(li); i++;
+					}
+					root.appendChild(list); continue;
+				}
+				var para = [];
+				while (i < lines.length && lines[i].trim() && !/^\s*(```|#{1,6}\s|>|([-*+]|\d+[.)])\s+)/.test(lines[i])) { para.push(lines[i]); i++; }
+				var p = document.createElement("p");
+				mdTextBlock(p, para);
+				root.appendChild(p);
+			}
+		}
 		function updateItemText(row, item) {
 			var span = row.querySelector ? row.querySelector(".pp-text") : null;
 			var text = rowText(item);
-			if (span) { if (span.textContent !== text) span.textContent = text; }
-			else if (row.textContent !== text) row.textContent = text;
+			if (span) {
+				if (span.__ppRaw === text) return;
+				span.__ppRaw = text;
+				if (item.kind === "message") {
+					var shown = text.length > 60000 ? text.slice(0, 60000) + "\n\n…（已截断）" : text;
+					try { renderMarkdown(span, shown); } catch (e) { span.textContent = shown; }
+				} else span.textContent = text;
+			} else if (row.textContent !== text) row.textContent = text;
 		}
 
 		function buildFeedItem(item) {
@@ -217,8 +309,17 @@ body[data-pair-panel-mode='abg'] .pp-panels { display:flex; }
 			if (item.kind === "message") row.className = "pp-msg " + (item.role === "user" ? "user" : "assistant");
 			else if (item.kind === "tool" || item.kind === "tool-out") row.className = "pp-tool";
 			else row.className = "pp-task";
-			var span = document.createElement("span"); span.className = "pp-text"; span.textContent = rowText(item);
-			row.appendChild(span);
+			var bodyEl = document.createElement(item.kind === "message" ? "div" : "span");
+			bodyEl.className = "pp-text" + (item.kind === "message" ? " pp-md" : "");
+			if (item.kind === "message") {
+				// New rows are built directly (updateFeed only refreshes kept rows
+				// when their text grows), so render the markdown here as well.
+				var initial = rowText(item);
+				var shown = initial.length > 60000 ? initial.slice(0, 60000) + "\n\n…（已截断）" : initial;
+				bodyEl.__ppRaw = initial;
+				try { renderMarkdown(bodyEl, shown); } catch (error) { bodyEl.textContent = shown; }
+			} else bodyEl.textContent = rowText(item);
+			row.appendChild(bodyEl);
 			timestamp(row, item.ts);
 			return row;
 		}
@@ -291,7 +392,10 @@ body[data-pair-panel-mode='abg'] .pp-panels { display:flex; }
 		}
 		function launchSide(state, fresh) {
 			fresh = !!fresh;
-			var pairName = state.peer === "claude" ? "cf" : "main";
+			// Launch the side on the pair currently selected in the panel (the
+			// old hardcoded main/cf names broke for any other pair name).
+			var snapPair = runtime.snapshot && runtime.snapshot.pair;
+			var pairName = snapPair && snapPair.name ? String(snapPair.name) : (state.peer === "claude" ? "cf" : "main");
 			var launch = getLaunchState(state.peer, pairName); state.launch = launch;
 			if (launch.status === "starting" || launch.status === "success") return;
 			setLaunchState(launch, "starting", "正在启动 " + launchLabel(state.peer) + "…");
@@ -329,7 +433,7 @@ body[data-pair-panel-mode='abg'] .pp-panels { display:flex; }
 			panel.className = "pp-card";
 			panel.setAttribute("data-peer", peer);
 			panel.setAttribute("aria-label", peer === "claude" ? "Claude peer conversation" : "Codex peer conversation");
-			runtime.panel.appendChild(panel);
+			runtime.cardsBox.appendChild(panel);
 			var state = { peer: peer, panel: panel, ui: {}, feed: null, feedKeys: [], feedItems: [], stickToBottom: true, restoringScroll: false, scrollRestoreToken: 0, launch: null };
 			var ui = state.ui;
 			var head = ui.head = add(panel, "div", "pp-head");
@@ -381,12 +485,12 @@ body[data-pair-panel-mode='abg'] .pp-panels { display:flex; }
 			for (var k = 0; k < peers.length; k++) {
 				var peer = peers[k];
 				var state = runtime.cards[peer] || buildPanel(peer);
-				var current = runtime.panel.children[k] || null;
+				var current = runtime.cardsBox.children[k] || null;
 				// Keep the requested order without detaching cards that are already
 				// in place; reparenting a scroll container resets its scrollTop.
-				if (current !== state.panel) runtime.panel.insertBefore(state.panel, current);
+				if (current !== state.panel) runtime.cardsBox.insertBefore(state.panel, current);
 			}
-			runtime.panel.className = "pp-panels " + (peers.length === 2 ? "both" : "single");
+			runtime.cardsBox.className = "pp-cards " + (peers.length === 2 ? "both" : "single");
 		}
 
 		function updateHead(state, peer, running, phase, pair, thread, snap, showPairSelector) {
@@ -428,18 +532,32 @@ body[data-pair-panel-mode='abg'] .pp-panels { display:flex; }
 
 		function restoreFeedScroll(state, saved, feedChanged) {
 			var feed = state.feed;
+			// "Was at the bottom" has to survive one bad frame: a transient
+			// clamp (row re-render / image layout) can make the live value false,
+			// so also trust the metrics captured before the update.
 			var stickToBottom = saved ? saved.stickToBottom : state.stickToBottom;
+			if (!stickToBottom && saved && typeof saved.height === 'number' && typeof saved.client === 'number') {
+				stickToBottom = saved.height - saved.client - (saved.top || 0) < 48;
+			}
 			var targetTop = saved ? saved.top : state.userScrollTop;
 			var token = ++state.scrollRestoreToken;
 			state.restoringScroll = true;
+			var settle = function () {
+				if (token !== state.scrollRestoreToken || !feed.isConnected) return;
+				if (stickToBottom) feed.scrollTop = feed.scrollHeight;
+				else feed.scrollTop = Math.min(targetTop || 0, Math.max(0, feed.scrollHeight - feed.clientHeight));
+			};
 			window.requestAnimationFrame(function () {
 				if (token !== state.scrollRestoreToken || !feed.isConnected) return;
-				if (feedChanged && stickToBottom) feed.scrollTop = feed.scrollHeight;
-				else feed.scrollTop = Math.min(targetTop || 0, Math.max(0, feed.scrollHeight - feed.clientHeight));
-				state.userScrollTop = feed.scrollTop;
-				state.stickToBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 48;
+				settle();
+				// Markdown/code blocks change height after their first layout; run
+				// a second pass so a bottom-stuck feed never drifts upward.
 				window.requestAnimationFrame(function () {
-					if (token === state.scrollRestoreToken) state.restoringScroll = false;
+					if (token !== state.scrollRestoreToken || !feed.isConnected) return;
+					settle();
+					state.userScrollTop = feed.scrollTop;
+					state.stickToBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 48;
+					state.restoringScroll = false;
 				});
 			});
 		}
@@ -502,7 +620,9 @@ body[data-pair-panel-mode='abg'] .pp-panels { display:flex; }
 			state.feedItems = oldItems;
 			state.feedKeys = keys;
 			var empty = feedBox.querySelector(".pp-empty");
-			if (!feed.length && !empty) add(feedBox, "div", "pp-empty", peer === "claude" ? "暂无对端消息（等待 Claude 发送消息）" : "暂无对端消息（等待 Codex 线程写入 rollout）");
+			if (!feed.length && !empty) add(feedBox, "div", "pp-empty", peer === "claude"
+				? "暂无 Claude 对端消息 · 点右侧「启动」拉起 abg claude"
+				: "暂无 Codex 线程消息 · 点右侧「启动」或「新」拉起 abg codex");
 			else if (feed.length && empty) empty.remove();
 			return changed;
 		}
@@ -510,7 +630,8 @@ body[data-pair-panel-mode='abg'] .pp-panels { display:flex; }
 		function updateFoot(state, snap) {
 			var ui = state.ui;
 			var footer = snap.at ? "更新于 " + new Date(snap.at).toLocaleTimeString() : "";
-			footer += (footer ? " · " : "") + "v5.3-scrollguard";
+			footer += (footer ? " · " : "") + "v5.3-sidebar";
+			if (snap.adapterDown) footer += (footer ? " · " : "") + "适配器未运行（abg dsh）";
 			if (runtime.error) footer += (footer ? " · " : "") + runtime.error;
 			if (state.launch && state.launch.message) footer += (footer ? " · " : "") + state.launch.message;
 			ui.foot.className = "pp-foot" + (state.launch && state.launch.status !== "idle" ? " launch-" + state.launch.status : "");
@@ -536,16 +657,20 @@ body[data-pair-panel-mode='abg'] .pp-panels { display:flex; }
 			var panel = runtime.panel; if (!panel) return;
 			if (!(isAbg() && runtime.enabled)) {
 				document.body.removeAttribute("data-pair-panel-mode"); clearLayout(); restoreLeftMaid();
-				panel.replaceChildren(); runtime.cards = {};
+				if (runtime.cardsBox) runtime.cardsBox.replaceChildren(); else panel.replaceChildren();
+				runtime.cards = {};
 				return;
 			}
 			document.body.setAttribute("data-pair-panel-mode", "abg");
 			var snap = runtime.snapshot; var pair = snap.pair || {}; var codex = snap.codex || {};
-			var peers = snap.peer === "both" ? ["codex", "claude"] : [snap.peer === "claude" ? "claude" : "codex"];
+			// Keep both peer sections mounted (like the left sidebar's section
+			// list): a side without data still exposes its launch action instead
+			// of making Claude invisible until it happens to have messages.
+			var peers = ["codex", "claude"];
 			var savedScroll = {};
 			for (var si = 0; si < peers.length; si++) {
 				var savedState = runtime.cards[peers[si]];
-				if (savedState && savedState.feed) savedScroll[peers[si]] = { top: savedState.feed.scrollTop, stickToBottom: savedState.stickToBottom };
+				if (savedState && savedState.feed) savedScroll[peers[si]] = { top: savedState.feed.scrollTop, stickToBottom: savedState.stickToBottom, height: savedState.feed.scrollHeight, client: savedState.feed.clientHeight };
 			}
 			ensurePanels(peers);
 			layoutPanel();
@@ -579,20 +704,20 @@ body[data-pair-panel-mode='abg'] .pp-panels { display:flex; }
 			}
 		}
 
-		function Sensor(props) {
-			var rerender = React.useState(0)[1]; React.useEffect(function () { return subscribe(function () { rerender(function (value) { return value + 1; }); }); }, []);
-			var pressure = null; try { if (typeof props.useProjection === "function") pressure = props.useProjection("contextPressure"); } catch (error) {}
-			var used = pressure && typeof pressure.projectedTokens === "number" ? pressure.projectedTokens : (pressure && typeof pressure.pressureTokens === "number" ? pressure.pressureTokens : null);
-			var windowSize = pressure && typeof pressure.contextWindow === "number" ? pressure.contextWindow : null;
-			React.useEffect(function () { if (!runtime.dsh || runtime.dsh.used !== used || runtime.dsh.window !== windowSize) { runtime.dsh = { used: used, window: windowSize }; renderPanel(); } }, [used, windowSize]);
-			if (!isAbg()) return null;
-			return React.createElement("button", { type:"button", className:"pp-toggle", role:"switch", "aria-checked":runtime.enabled ? "true" : "false", title:runtime.enabled ? "关闭 Codex 对端面板" : "打开 Codex 对端面板", onClick:function () { setEnabled(!runtime.enabled); } }, React.createElement("span", { className:"pp-toggle-dot", "aria-hidden":"true" }), "Codex 面板");
-		}
-
 		function apply(ctx) {
 			ctx.effect(function () {
-				var style = document.createElement("style"); style.setAttribute("data-plugin-css", "ui-pair-panel"); style.textContent = CSS; document.head.appendChild(style);
-				var panel = document.createElement("div"); panel.className = "pp-panels single"; panel.setAttribute("data-pair-panel", "1"); document.body.appendChild(panel); runtime.panel = panel;
+				var style = document.createElement("style"); style.setAttribute("data-plugin-css", "ui-pair-panel"); style.dataset.plugin = "@dsh-external/dsh-client-ui-pair-panel"; style.textContent = CSS; document.head.appendChild(style);
+				// Docked rail: a simple title row + card list. The open/close
+				// control lives in the session menu bar (see the slot registration
+				// below), so nothing floats over content or the menu bar.
+				var panel = document.createElement("div"); panel.className = "pp-panels"; panel.setAttribute("data-pair-panel", "1");
+				var railHead = document.createElement("div"); railHead.className = "pp-railhead";
+				railHead.appendChild(add(railHead, "span", "pp-railtitle", "对端"));
+				var cardsBox = document.createElement("div"); cardsBox.className = "pp-cards";
+				panel.appendChild(railHead); panel.appendChild(cardsBox);
+				document.body.appendChild(panel);
+				runtime.panel = panel; runtime.cardsBox = cardsBox;
+				renderPanel();
 				loadSnapshot(); var timer = window.setInterval(loadSnapshot, POLL_MS);
 				var onResize = function () { if (isAbg() && runtime.enabled) layoutPanel(); };
 				window.addEventListener("resize", onResize);
@@ -607,13 +732,42 @@ body[data-pair-panel-mode='abg'] .pp-panels { display:flex; }
 					}
 					if (panel.isConnected) panel.remove();
 					if (style.isConnected) style.remove();
-					runtime.panel = null; runtime.cards = {}; runtime.launches = {};
+					runtime.panel = null; runtime.cardsBox = null; runtime.cards = {}; runtime.launches = {};
 				};
 			}, "ui-pair-panel: native panel");
-			var slots = ctx.get("slots"); if (!slots) return;
-			slots.inject("conversation.session.header.actions", function () { return slots.register({ name:"conversation.session.header.actions", id:"ui-pair-panel-sensor", order:100, label:"pair-panel sensor" }, function (props) { return React.createElement(Sensor, props); }); });
+			// The open/close control sits in the session menu bar, like the
+			// other header actions: a compact 26px icon button (no text, so it
+			// cannot collide with the folder/overflow icons in a narrow window).
+			try {
+				var slots = ctx.slots || ctx.get("slots");
+				if (slots && typeof slots.inject === "function") {
+					slots.inject("conversation.session.header.utilities", function () {
+						return slots.register({ name:"conversation.session.header.utilities", id:"ui-pair-panel-toggle", order:100, label:"pair-panel toggle" }, function (props) {
+							React.useEffect(function () {
+								var next = props && props.sessionId ? String(props.sessionId) : "";
+								if (next && runtime.sessionId !== next) { runtime.sessionId = next; loadSnapshot(); }
+							}, [props && props.sessionId]);
+							var icon = React.createElement("svg", { width:14, height:14, viewBox:"0 0 16 16", fill:"none", "aria-hidden":"true" },
+								React.createElement("rect", { x:1.75, y:2.75, width:12.5, height:10.5, rx:2, stroke:"currentColor", strokeWidth:1.3 }),
+								React.createElement("path", { d:"M10.25 2.75v10.5", stroke:"currentColor", strokeWidth:1.3 }));
+							return React.createElement("button", {
+								type: "button",
+								className: "pp-toggle",
+								role: "switch",
+								"aria-checked": runtime.enabled ? "true" : "false",
+								"aria-label": "对端面板",
+								title: runtime.enabled ? "隐藏对端面板" : "显示对端面板",
+								onClick: function () { setEnabled(!runtime.enabled); },
+							}, icon);
+						});
+					});
+				}
+			} catch (e) {}
 		}
 		exports.apply = apply;
+		// The invisible sensor (and no visible header control) needs the slot
+		// service; the rail itself is pure DOM and does not.
+		exports.inject = ["slots"];
 		return module.exports;
 	}
 });

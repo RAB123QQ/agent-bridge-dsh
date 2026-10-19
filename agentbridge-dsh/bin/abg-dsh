@@ -37,23 +37,129 @@ const STATE_DIR = process.env.ABG_STATE_DIR ?? join(homedir(), ".local/state/age
 const REGISTRY = join(STATE_DIR, "pairs/registry.json");
 const DEFAULT_MCP_PORT = parseInt(process.env.ABG_MCP_PORT ?? "8765", 10);
 const RUN_DIR = process.env.ABG_RUN_DIR ?? join(homedir(), "agentbridge-dsh/run");
-const DSH_WEB_URL = process.env.ABG_DSH_WEB_URL ?? "http://127.0.0.1:3080";
-const DSH_WEB_PORT = parseInt(new URL(DSH_WEB_URL).port, 10) || 3080;
+// Mutable: resolved at runtime so the same adapter can drive a plain
+// `dsh web` deployment (default :3080) or the DeepSeek Harness desktop
+// application (random loopback port, discovered in resolveDshWeb()).
+let DSH_WEB_URL = process.env.ABG_DSH_WEB_URL ?? process.env.DSH_WEB_URL ?? null;
+let DSH_WEB_PORT = 3080;
+let DESKTOP_HOST = false;
 const DSH_WEB_CMD = (process.env.ABG_DSH_WEB_CMD ?? "dsh web").split(/\s+/).filter(Boolean);
 const CHROMIUM_CMD = process.env.ABG_CHROMIUM_CMD ?? "chromium";
 
+/** Loopback TCP listeners and their owning PIDs (Windows `netstat -ano`). */
+function winLoopbackListeners() {
+  const out = [];
+  try {
+    const res = spawnSync("netstat", ["-ano", "-p", "tcp"], { encoding: "utf8", windowsHide: true });
+    if (!res || res.status !== 0) return out;
+    for (const line of String(res.stdout || "").split(/\r?\n/)) {
+      const m = /^\s*TCP\s+(\S+):(\d+)\s+\S+\s+LISTENING\s+(\d+)\s*$/i.exec(line);
+      if (!m) continue;
+      const host = m[1].replace(/^\[|\]$/g, "");
+      if (host !== "127.0.0.1" && host !== "::1" && host !== "0.0.0.0" && host !== "::") continue;
+      const port = Number(m[2]);
+      const pid = Number(m[3]);
+      if (port > 0 && pid > 0) out.push({ port, pid });
+    }
+  } catch {}
+  return out;
+}
+
+/** PIDs of the running DeepSeek Harness desktop application (Windows). */
+function desktopHarnessPids() {
+  const pids = new Set();
+  if (process.platform !== "win32") return pids;
+  try {
+    const res = spawnSync("tasklist", ["/FI", "IMAGENAME eq DeepSeek Harness.exe", "/FO", "CSV", "/NH"], { encoding: "utf8", windowsHide: true });
+    for (const line of String((res && res.stdout) || "").split(/\r?\n/)) {
+      const m = /^"[^"]+","(\d+)"/.exec(line.trim());
+      if (m) pids.add(Number(m[1]));
+    }
+  } catch {}
+  return pids;
+}
+
+/** True when `origin` serves the DSH web GUI (manifest fingerprint; needs no auth). */
+async function isDshWeb(origin) {
+  try {
+    const res = await fetch(`${origin}/manifest.webmanifest`, { signal: AbortSignal.timeout(900) });
+    if (!res.ok) return false;
+    const body = await res.text();
+    return /deepseek|harness|"DSH"/i.test(body);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve which DSH web origin this adapter should talk to.
+ *
+ * Priority: --dsh-web-url / ABG_DSH_WEB_URL / DSH_WEB_URL, then (Windows) the
+ * desktop app's own loopback ports discovered from netstat + tasklist, then the
+ * classic `dsh web` default http://127.0.0.1:3080.
+ */
+async function resolveDshWeb(args = []) {
+  const explicit = argValue(args, ["--dsh-web-url"], null) ?? DSH_WEB_URL;
+  if (explicit) {
+    DSH_WEB_URL = explicit.replace(/\/+$/, "");
+    DSH_WEB_PORT = parseInt(new URL(DSH_WEB_URL).port, 10) || 3080;
+    // Even an explicit URL may point at the desktop app: recognize its PID so
+    // the one-key flow does not try to launch a second `dsh web`.
+    if (process.platform === "win32") {
+      try {
+        const pids = desktopHarnessPids();
+        if (pids.size > 0) {
+          DESKTOP_HOST = winLoopbackListeners().some((item) => item.port === DSH_WEB_PORT && pids.has(item.pid));
+        }
+      } catch {}
+    }
+    return { url: DSH_WEB_URL, desktop: DESKTOP_HOST, explicit: true };
+  }
+  if (process.platform === "win32") {
+    const pids = desktopHarnessPids();
+    if (pids.size > 0) {
+      const listeners = winLoopbackListeners().filter((item) => pids.has(item.pid));
+      for (const { port } of listeners) {
+        const origin = `http://127.0.0.1:${port}`;
+        if (await isDshWeb(origin)) {
+          DSH_WEB_URL = origin;
+          DSH_WEB_PORT = port;
+          DESKTOP_HOST = true;
+          return { url: origin, desktop: true, explicit: false };
+        }
+      }
+    }
+  }
+  DSH_WEB_URL = "http://127.0.0.1:3080";
+  DSH_WEB_PORT = 3080;
+  return { url: DSH_WEB_URL, desktop: false, explicit: false };
+}
+
+/** Where the MCP insert row should be written for the resolved DSH host. */
+function dshConfigHint() {
+  return DESKTOP_HOST
+    ? "$DSH_HOME/profiles/desktop/cordis.patch.yml（或 home 层 $DSH_HOME/cordis.patch.yml，两个 profile 通用）"
+    : "$DSH_HOME/profiles/web/cordis.patch.yml";
+}
+
 function usage() {
   console.log(`Usage:
-  abg dsh --pair NAME     one-key: DSH web + chromium window + bridge into the pair (--pair REQUIRED)
+  abg dsh --pair NAME     one-key: MCP adapter + DSH web/desktop + chromium window + bridge into the pair
+                          (auto-detects the running DeepSeek Harness desktop app; otherwise starts \`dsh web\`)
+  abg dsh --pair NAME --dsh-web-url URL
+                          attach to a specific DSH GUI origin (also ABG_DSH_WEB_URL / DSH_WEB_URL env)
   abg dsh --server --pair NAME
                           Role B: DSH as the pair's codex app-server (for abg claude pairing)
   abg dsh --http-port N   MCP http port (default ${DEFAULT_MCP_PORT})
+  abg dsh mcp [--mode channel|server] [--http-port N] [--stdio]
+                          only serve the MCP adapter (no DSH web launch)
   abg dsh channel --proxy-port N --send "text"
   abg dsh server --port N [--mock]
   abg dsh watch --pair NAME [--lines N] [-f/--follow] [--since "HH:MM"]
   abg dsh doctor
 
-Env: ABG_STATE_DIR, ABG_MCP_PORT, ABG_PROXY_PORT, ABG_APP_PORT.`);
+Env: ABG_STATE_DIR, ABG_MCP_PORT, ABG_PROXY_PORT, ABG_APP_PORT,
+     ABG_DSH_WEB_URL, DSH_WEB_URL, ABG_DSH_WEB_CMD, ABG_CHROMIUM_CMD.`);
 }
 
 function argValue(args, names, fallback) {
@@ -151,16 +257,55 @@ async function mcpAlive(port) {
   }
 }
 
+function resolveSpawnCommand(cmd) {
+  const isWindows = process.platform === "win32";
+  if (!isWindows) return { file: cmd, prefix: [] };
+  // `where.exe` resolves PATHEXT entries, including .cmd shims that
+  // CreateProcess cannot launch directly.
+  let file = cmd;
+  try {
+    const res = spawnSync("where", [cmd], { encoding: "utf8", windowsHide: true });
+    if (res && res.status === 0) {
+      const first = String(res.stdout || "").split(/\r?\n/).map((l) => l.trim()).find(Boolean);
+      if (first) file = first;
+    }
+  } catch {}
+  const lower = file.toLowerCase();
+  if (lower.endsWith(".cmd") || lower.endsWith(".bat")) return { file: "cmd.exe", prefix: ["/c", file] };
+  if (lower.endsWith(".ps1")) return { file: "powershell.exe", prefix: ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", file] };
+  return { file, prefix: [] };
+}
+
 function startDetached(cmd, args, logName) {
   mkdirSync(RUN_DIR, { recursive: true });
   const out = openSync(join(RUN_DIR, logName), "a");
-  const child = spawn(cmd, args, { detached: true, stdio: ["ignore", out, out] });
-  writeFileSync(join(RUN_DIR, `${logName}.pid`), String(child.pid));
+  const { file, prefix } = resolveSpawnCommand(cmd);
+  let child;
+  try {
+    child = spawn(file, [...prefix, ...args], { detached: true, stdio: ["ignore", out, out], windowsHide: true });
+  } catch (e) {
+    log(`warning: could not start ${cmd}: ${e.message}`);
+    return null;
+  }
+  // A failed spawn (ENOENT / EINVAL on a .cmd) emits 'error' asynchronously;
+  // without a listener it would crash this adapter.
+  child.on("error", (e) => log(`warning: ${cmd} failed to start: ${e.message}`));
+  writeFileSync(join(RUN_DIR, `${logName}.pid`), child.pid === undefined ? "" : String(child.pid));
   child.unref();
-  return child.pid;
+  return child.pid ?? null;
 }
 
 function chromiumAppRunning() {
+  if (process.platform === "win32") {
+    try {
+      const marker = readFileSync(join(RUN_DIR, "chromium.url"), "utf8").trim();
+      if (marker !== DSH_WEB_URL) return false;
+      const res = spawnSync("tasklist", ["/FI", "IMAGENAME eq chrome.exe", "/FO", "CSV", "/NH"], { encoding: "utf8", windowsHide: true });
+      return /^"chrome\.exe"/im.test(String((res && res.stdout) || ""));
+    } catch {
+      return false;
+    }
+  }
   const res = spawnSync("pgrep", ["-f", `chromium.*--app=${DSH_WEB_URL.replace(/[/:]/g, ".")}`]);
   // URL contains regex chars; fall back to a simple match below
   if (res.status === 0 && res.stdout.toString().trim().length > 0) return true;
@@ -179,6 +324,8 @@ async function cmdEnv(args) {
   const pair = discoverPair(args);
   const proxyPort = parseInt(argValue(args, ["--proxy-port"], String(pair.ports.proxyPort)), 10);
   const startedPids = [];
+  const dshTarget = await resolveDshWeb(args);
+  log(`DSH host: ${dshTarget.url}${dshTarget.desktop ? " (DeepSeek Harness desktop app)" : " (dsh web)"}${dshTarget.explicit ? " [explicit]" : dshTarget.desktop ? " [auto-detected]" : " [default]"}`);
 
   // 1) MCP adapter into the pair FIRST (so a freshly started DSH web finds
   //    the MCP server already up when its dsh-mcp-client loads the patch).
@@ -209,10 +356,10 @@ async function cmdEnv(args) {
 
   log(`DSH bridge: serving pair ${pair.name} on ${mcpUrl} — foreground, Ctrl-C to stop`);
   log("");
-  log("DSH 接入配置（$DSH_HOME/profiles/web/cordis.patch.yml，HMR 热生效）:");
+  log(`DSH 接入配置（${dshConfigHint()}，HMR 热生效；加 toolCallTimeoutMs: 300000 避免长回合被 60s 超时）:`);
   log(`  - id: mcp-agentbridge`);
   log(`    name: '@deepseek-ai/dsh-mcp-client'`);
-  log(`    config: { serverName: abg, transport: streamable-http, url: ${mcpUrl} }`);
+  log(`    config: { serverName: abg, transport: streamable-http, url: ${mcpUrl}, toolCallTimeoutMs: 300000 }`);
   log(`之后本会话工具列表出现 mcp__abg__send_message / get_messages / pair_status`);
 
   const { mode, engine } = await makeEngine(pair, args, log);
@@ -241,23 +388,33 @@ async function cmdEnv(args) {
   const srv = await serveHttp(mcp, httpPort);
   log(`MCP ready: ${mcpUrl}`);
 
-  // 2) DSH web (now that the MCP server is up, dsh-mcp-client will find it)
+  // 2) DSH host (now that the MCP server is up, dsh-mcp-client will find it).
+  //    A running DeepSeek Harness desktop app is reused as-is; otherwise the
+  //    classic `dsh web` is launched.
   const webUrl = DSH_WEB_URL;
   if (await isHttpAlive(webUrl)) {
-    log(`DSH web: already running at ${webUrl} (skip)`);
+    log(`DSH host: already running at ${webUrl} (skip${DESKTOP_HOST ? ", desktop app" : ""})`);
+  } else if (DESKTOP_HOST) {
+    log(`DSH host: desktop app detected at ${webUrl} but not reachable; restart DeepSeek Harness and re-run`);
   } else {
     const pid = startDetached(DSH_WEB_CMD[0], DSH_WEB_CMD.slice(1), "dsh-web");
-    startedPids.push(pid);
-    log(`DSH web: starting \`${DSH_WEB_CMD.join(" ")}\` (pid ${pid}) -> ${webUrl}`);
+    if (pid) startedPids.push(pid);
+    log(`DSH web: starting \`${DSH_WEB_CMD.join(" ")}\` (pid ${pid ?? "?"}) -> ${webUrl}`);
   }
 
-  // 3) chromium app window
-  if (chromiumAppRunning()) {
+  // 3) chromium app window (never for the desktop app: its window already exists)
+  if (DESKTOP_HOST) {
+    log("DSH window: desktop app window already open (skip chromium)");
+  } else if (chromiumAppRunning()) {
     log(`DSH window: chromium --incognito --app=${webUrl} already open (skip)`);
   } else {
     const pid = startDetached(CHROMIUM_CMD, ["--incognito", `--app=${webUrl}`], "chromium");
-    startedPids.push(pid);
-    log(`DSH window: opening chromium --incognito --app=${webUrl} (pid ${pid})`);
+    if (pid) startedPids.push(pid);
+    try {
+      mkdirSync(RUN_DIR, { recursive: true });
+      writeFileSync(join(RUN_DIR, "chromium.url"), webUrl);
+    } catch {}
+    log(`DSH window: opening chromium --incognito --app=${webUrl} (pid ${pid ?? "?"})`);
   }
 
   // 4) default: stream the claude<->codex conversation of this pair
@@ -335,10 +492,10 @@ async function cmdStart(args) {
   const srv = await serveHttp(mcp, httpPort);
   log(`MCP ready: http://127.0.0.1:${srv.port}/mcp  (mode=${mode}, Ctrl-C to stop)`);
   log("");
-  log(`DSH 接入配置（$DSH_HOME/profiles/web/cordis.patch.yml，HMR 热生效）:`);
+  log(`DSH 接入配置（${dshConfigHint()}，HMR 热生效）:`);
   log(`  - id: mcp-agentbridge`);
   log(`    name: '@deepseek-ai/dsh-mcp-client'`);
-  log(`    config: { serverName: abg, transport: streamable-http, url: http://127.0.0.1:${srv.port}/mcp }`);
+  log(`    config: { serverName: abg, transport: streamable-http, url: http://127.0.0.1:${srv.port}/mcp, toolCallTimeoutMs: 300000 }`);
   log(`之后本会话工具列表出现 mcp__abg__send_message / get_messages / pair_status`);
 
   process.on("SIGINT", () => {
@@ -583,6 +740,7 @@ if (isDshInvocation) {
   if (sub === "watch") process.exit(await cmdWatch(args.slice(1)));
   if (sub === "channel") process.exit(await cmdChannel(args.slice(1)));
   if (sub === "server") process.exit(await cmdServer(args.slice(1)));
+  if (sub === "mcp") process.exit(await cmdMcp(args.slice(1)));
   if (sub === "doctor") process.exit(await cmdDoctor(args.slice(1)));
   if (sub === "stub") {
     const code = codexStubMain([process.argv[0], process.argv[1], ...args.slice(1)]);

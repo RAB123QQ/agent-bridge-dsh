@@ -3,7 +3,7 @@
 > 本目录由 [visualeafsama-hub/dsh-pair-panel](https://github.com/visualeafsama-hub/dsh-pair-panel)
 > 改进而来，新增 Codex / Claude 双面板布局、面板启动按钮、`claude_send` 会话展示等功能。
 
-DSH Web GUI 插件：**Codex 对端面板** —— 与 DSH 会话并排显示 agentbridge 对端（Codex）的实时状态、上下文用量与消息流。
+DSH Web GUI 插件：**对端面板** —— 在 DSH 会话右侧停靠显示 agentbridge 对端（Codex / Claude）的实时状态、上下文用量与消息流。
 
 ![preview](preview.png)
 
@@ -12,22 +12,52 @@ DSH Web GUI 插件：**Codex 对端面板** —— 与 DSH 会话并排显示 ag
 > pair 状态读取、Codex rollout 解析与推送通知钩子。本仓库只负责面板 UI 与数据加工，
 > 底层通信全部由 agentbridge-dsh 完成。
 
-- 仅 `abg dsh --pair <name>` 启动的 DSH web 生效；普通 `dsh web` 完全无感。
-- 面板紧贴 DSH 输入框右侧，左右鲸鱼娘保持原位、互不遮挡。
-- 支持浅色/深色主题（跟随 `data-ds-dark-theme`）。
-- 面板与会话同级（z-index 0），设置页等覆盖层在其上。
-- 会话标题栏有「Codex 面板」开关，可随时隐藏并恢复原布局（localStorage 记忆）。
+- **右侧通栏停靠栏**：从标题栏下沿一直顶到底，与左侧侧边栏同一视觉语言；会话列自动预留栏宽，不遮挡聊天内容。
+- **Codex / Claude 双栏**：两栏常显，缺少数据的一侧直接给出「启动」按钮，不会让 Claude 无缘无故消失。
+- **菜单栏开关**：标题栏右侧工具区的小图标，随时显示/隐藏对端栏（localStorage 记忆）。
+- **Markdown 消息渲染**：代码块、列表、引用、链接、行内代码、粗体/斜体/删除线；纯 DOM 构建，不注入 HTML。
+- 支持浅色/深色主题（跟随 DSH 主题变量）。
 - 消息去重：Codex rollout 同一条消息记录两次（`response_item` + `event_msg`），面板只显示一次。
 - 推送唤醒：Codex 回复实时注入 DSH 会话，无需手动拉取。
+- 兼容 DSH 0.1.x / 0.2.x（web profile 与桌面 App 的 desktop profile），安装见下。
 
-## 安装
+## 安装（DSH 0.1.x / 0.2.x 通用）
+
+本插件是 DSH "bundle" 插件：安装 = 把包加入目标 profile 的 `dsh.profile.bundles`
+（CLI 会自动完成），MCP 配置则写 profile 或 home 层的 `cordis.patch.yml`。
+DSH 0.2.x 有两类宿主，**落点不同**：
+
+### A. CLI / 浏览器 web 版（`dsh web` 或 `abg dsh --pair` 拉起，profile = web）
 
 ```bash
-dsh plugin --profile web add <dsh-pair-panel 路径或 git url>
+dsh plugin --profile web add <dsh-pair-panel 绝对路径或 git url>
 ```
 
-安装后重启 `abg dsh --pair <name>`（或刷新已打开的页面），浏览器刷新即生效。
-宿主侧改动（消息去重、推送唤醒）需 DSH 重启后才生效。
+### B. 桌面 App（DeepSeek Harness，profile = desktop）
+
+普通 `dsh` CLI 会拒绝 `--profile desktop`（桌面版 profile 由 Electron 独占）。
+任选其一：
+
+1. **推荐**：打开桌面 App → 侧栏「插件」→「添加插件」→「安装第三方插件」→
+   选择 **本地目录**（指向本目录 `dsh-pair-panel`）；
+2. 完全退出 App 后，用桌面版自带的 CLI：
+   ```bat
+   "C:\Users\<you>\AppData\Local\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd" plugin --profile desktop add "<本目录绝对路径>"
+   ```
+
+### C. 一次装好两边 + 写 MCP 配置
+
+仓库根目录的 `install-dsh.ps1` 会分别调用 web / desktop 的 CLI 安装，并把 MCP
+insert row 写入 home 层（`$DSH_HOME/cordis.patch.yml`，对两个 profile 都生效）：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install-dsh.ps1 -Profile both
+# 桌面 App 在运行时需先完全退出（或加 -AllowDesktopRunning 自担风险）
+```
+
+安装后：`dsh web` 部署刷新页面即可；桌面 App 需要重启/重新加载页面后，会话标题栏
+出现「Codex 面板」开关。宿主侧改动（推送唤醒 source kind、路由注册）在 DSH 0.2.x
+上需要重启宿主进程才生效。
 
 ## 依赖
 

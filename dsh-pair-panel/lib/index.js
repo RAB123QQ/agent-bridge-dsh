@@ -79,7 +79,11 @@ function homeOf(cwd) {
 }
 
 async function deriveHome(ctx, session) {
-  let home = session && session.meta ? homeOf(session.meta.cwd) : undefined
+  // Session creation metadata moved from `session.meta` (DSH 0.1.x) to
+  // `session.header` (DSH 0.2.x session format v4). Support both so the
+  // plugin keeps working on old and current runtimes.
+  const meta = session ? (session.header || session.meta) : undefined
+  let home = meta ? homeOf(meta.cwd) : undefined
   if (!home) {
     try {
       const ws = ctx.get('workspaceRegistry')
@@ -92,6 +96,37 @@ async function deriveHome(ctx, session) {
     try { home = homedir() } catch {}
   }
   return home
+}
+
+// Claude Code encodes a project directory name from its cwd by replacing
+// every non-alphanumeric character with '-'. Older code here only replaced
+// path separators, which misses the dot in directories like \.dsh. Resolve
+// the real directory by comparing both spellings against the listing.
+function claudeProjectCandidates(cwd) {
+  const raw = String(cwd || '')
+  const variants = [
+    raw.replace(/[\/:]/g, '-'),
+    raw.replace(/[^A-Za-z0-9]/g, '-'),
+  ]
+  const out = []
+  for (const v of variants) {
+    out.push(v)
+    if (v) out.push(v.charAt(0).toLowerCase() + v.slice(1))
+  }
+  return out.filter(Boolean)
+}
+
+async function resolveClaudeProjectDir(ctx, home, cwd) {
+  const root = home + '/.claude/projects'
+  const wanted = claudeProjectCandidates(cwd).map((x) => x.toLowerCase())
+  try {
+    const entries = await safeList(ctx, root)
+    for (const entry of entries) {
+      const name = entry && typeof entry.name === 'string' ? entry.name : ''
+      if (name && wanted.indexOf(name.toLowerCase()) >= 0) return root + '/' + name
+    }
+  } catch {}
+  return root + '/' + String(cwd || '').replace(/[\/:]/g, '-')
 }
 
 async function findPairs(ctx, home) {
@@ -121,8 +156,7 @@ async function findPairs(ctx, home) {
     if (meta.cwd) {
       const dbg = { pair: meta.pairName || name, t }
       try {
-        const enc = String(meta.cwd).replace(/[\\/:]/g, '-')
-        const projDir = home + '/.claude/projects/' + enc
+        const projDir = await resolveClaudeProjectDir(ctx, home, meta.cwd)
         dbg.projDir = projDir
         const files = await safeList(ctx, projDir)
         dbg.fileCount = files.length
@@ -201,6 +235,118 @@ async function findRollout(ctx, home, threadId) {
     rolloutCache.set(threadId, p)
     return p
   }
+  return null
+}
+
+// ── rollout fallback by cwd ────────────────────────────────────────────────
+// agentbridge's current-thread.json can point at the daemon app-server's
+// temporary thread while the Codex TUI writes a different thread. When the
+// recorded thread has no rollout, match a rollout's session_meta.cwd against
+// the pair cwd instead, so the panel still shows the live conversation.
+const rolloutByCwdCache = new Map()
+
+function sameCwd(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string' || !a || !b) return false
+  const norm = (p) => p.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase()
+  return norm(a) === norm(b)
+}
+
+async function readFirstLine(ctx, p) {
+  try {
+    const fs = ctx.get('fs')
+    if (!fs) return ''
+    const target = await fs.resolve(p)
+    const iter = await fs.streamText(target)
+    let buf = ''
+    for await (const chunk of iter) {
+      buf += chunk
+      const nl = buf.indexOf('\n')
+      if (nl >= 0) return buf.slice(0, nl)
+      if (buf.length > 8192) break
+    }
+    return buf
+  } catch {
+    return ''
+  }
+}
+
+async function scanAllRollouts(ctx, dir, depth) {
+  if (depth > 3 || scanBudget <= 0) return []
+  const out = []
+  const entries = await safeList(ctx, dir)
+  for (const e of entries) {
+    const name = e && typeof e.name === 'string' ? e.name : ''
+    if (!name) continue
+    scanBudget -= 1
+    const p = dir + '/' + name
+    if (name.startsWith('rollout-') && name.endsWith('.jsonl')) {
+      const st = await safeStat(ctx, p)
+      out.push({ p, m: statMtimeMs(st) })
+    } else {
+      out.push(...await scanAllRollouts(ctx, p, depth + 1))
+    }
+  }
+  return out
+}
+
+async function findRolloutByCwd(ctx, home, cwd) {
+  if (!cwd) return null
+  const cached = rolloutByCwdCache.get(cwd)
+  if (cached && Date.now() - cached.at < 30000) {
+    const st = await safeStat(ctx, cached.p)
+    if (st) return cached.p
+    rolloutByCwdCache.delete(cwd)
+  }
+  scanBudget = 3000
+  const all = await scanAllRollouts(ctx, home + CODEX_SESSIONS, 0)
+  all.sort((a, b) => b.m - a.m)
+  for (const item of all.slice(0, 80)) {
+    const line = await readFirstLine(ctx, item.p)
+    if (!line) continue
+    const rec = parseJson(line)
+    const meta = rec && rec.payload && typeof rec.payload === 'object' ? rec.payload : null
+    if (meta && sameCwd(meta.cwd, cwd)) {
+      rolloutByCwdCache.set(cwd, { p: item.p, at: Date.now() })
+      return item.p
+    }
+  }
+  return null
+}
+
+// Extract the codex thread id from a rollout filename so the panel can show
+// the thread that actually produced the feed.
+function threadIdFromRollout(p) {
+  const m = /rollout-[^\\/]*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i.exec(p || '')
+  return m ? m[1] : null
+}
+
+async function dirExists(ctx, p) {
+  if (typeof p !== 'string' || !p) return false
+  try {
+    const fs = ctx.get('fs')
+    if (!fs) return false
+    const target = await fs.resolve(p)
+    const st = await fs.stat(target)
+    return !!(st && (st.type === 'dir' || st.type === 'directory'))
+  } catch {
+    return false
+  }
+}
+
+// Pick a launch directory for a pair whose recorded cwd no longer exists.
+async function fallbackLaunchCwd(ctx) {
+  try {
+    const ws = ctx.get('workspaceRegistry')
+    const list = ws && typeof ws.list === 'function' ? ws.list() : []
+    for (const item of list) {
+      if (item && typeof item.path === 'string' && await dirExists(ctx, item.path)) return item.path
+    }
+  } catch {}
+  try {
+    const session = resolveSession(ctx, '')
+    const meta = session ? (session.header || session.meta) : undefined
+    if (meta && typeof meta.cwd === 'string' && await dirExists(ctx, meta.cwd)) return meta.cwd
+  } catch {}
   return null
 }
 
@@ -337,6 +483,10 @@ async function snapshot(ctx, sessionId, selectedName) {
   const pair = (selectedName ? allPairs.find((p) => p.name === selectedName) : null) || allPairs[0]
   let rollout = pair.rolloutPath
   if (!rollout) rollout = await findRollout(ctx, home, pair.threadId)
+  if (!rollout && pair.cwd) rollout = await findRolloutByCwd(ctx, home, pair.cwd)
+  // The recorded thread id can disagree with the TUI-written rollout; report
+  // the thread that actually owns the feed we show.
+  const threadId = (rollout && threadIdFromRollout(rollout)) || pair.threadId
   const feed = []
   let codexTokens = null
   let codexWindow = null
@@ -428,8 +578,11 @@ async function snapshot(ctx, sessionId, selectedName) {
   const hasClaude = !!(pair.claudeFeed || pair.claudeSession)
   const peer = hasClaude && rollout ? 'both' : hasClaude ? 'claude' : rollout ? 'codex' : 'none'
   const dsh = dshContext(ctx, session)
-  let window = null
-  if (dsh) window = await contextWindow(ctx)
+  // The DSH model's context window does not depend on a live session, so it
+  // can be resolved even when the HTTP handler has no session boundary (which
+  // is always the case for a webServer route). This keeps both peer gauges
+  // rendering a percentage on current DSH.
+  const window = await contextWindow(ctx)
   // Peer context windows are often unknown (codex token_count may carry no
   // model window, the claude side carries none at all). Fall back to the DSH
   // model's window so both gauges can still render a percent + progress bar.
@@ -446,7 +599,7 @@ async function snapshot(ctx, sessionId, selectedName) {
     })),
     pair: {
       name: pair.name,
-      threadId: pair.threadId,
+      threadId,
       phase: pair.phase,
       turn: pair.turn,
       status: pair.status,
@@ -499,10 +652,21 @@ async function pushNotify(ctx, payload) {
   if (!content) return
   const agents = ctx.get('agents')
   if (!agents) return
-  const roots = typeof agents.roots === 'function' ? agents.roots() : []
-  if (!roots.length) return
-  const agent = roots[0]
-  if (typeof agent.followup !== 'function') return
+  // Prefer the session/agent named by the poster (the adapter can know which
+  // DSH session started it); otherwise fall back to the first live root agent.
+  let agent
+  try {
+    const wanted = payload?.agentId || payload?.sessionId
+    if (wanted && typeof agents.get === 'function') agent = agents.get(String(wanted))
+    if (!agent && wanted && typeof agents.list === 'function') {
+      agent = agents.list().find((candidate) => candidate && candidate.session && String(candidate.session.id) === String(wanted))
+    }
+  } catch {}
+  if (!agent) {
+    const roots = typeof agents.roots === 'function' ? agents.roots() : []
+    agent = roots[0]
+  }
+  if (!agent || typeof agent.followup !== 'function') return
   try {
     // Must go through createUserMessage: DSH messages need a `source.kind`
     // tag; a bare {role,content} object crashes the loop with
@@ -510,7 +674,12 @@ async function pushNotify(ctx, payload) {
     const { createUserMessage } = await import('@deepseek-ai/dsh-llm')
     const message = createUserMessage({
       content: [{ type: 'text', text: `【Codex 对端消息】（agentbridge 推送，id=${id || '-'}）：\n${content.slice(0, 2000)}` }],
-      source: { kind: 'plugin', plugin: 'ui-pair-panel' },
+      // Session format v4 (DSH 0.2.x) retired the old `{kind:'plugin', plugin}`
+      // wrapper: its encoder throws "format v4 message requires a
+      // producer-owned source kind" and stalls the session log. The v4
+      // convention for third-party plugin sources is `plugin:<plugin-name>`,
+      // which is preserved as-is by native admission.
+      source: { kind: 'plugin:ui-pair-panel' },
     })
     agent.followup(message)
   } catch (e) {
@@ -589,14 +758,15 @@ function launchPathLine() {
   return parts.filter((p) => p && existsSync(p)).join(';')
 }
 
-function launchPeerTerminal(side, pair, fresh) {
+function launchPeerTerminal(side, pair, fresh, cwd) {
+  const launchCwd = typeof cwd === 'string' && cwd ? cwd : pair.cwd
   // pair names are validated by hasUnsafeChars (no quotes/newlines), so they
   // are safe to interpolate unquoted.
   const cmdText = side === 'claude'
     ? `abg claude --safe --pair ${pair.name}`
     : `abg codex --pair ${pair.name}${fresh ? ' --new' : ''}`
   if (findWtExe()) {
-    const child = spawn('wt.exe', ['new-tab', '-d', pair.cwd, 'powershell.exe', '-NoExit', '-Command', cmdText], { detached: true, stdio: 'ignore' })
+    const child = spawn('wt.exe', ['new-tab', '-d', launchCwd, 'powershell.exe', '-NoExit', '-Command', cmdText], { detached: true, stdio: 'ignore' })
     child.unref()
     return
   }
@@ -607,12 +777,12 @@ function launchPeerTerminal(side, pair, fresh) {
   const scriptFile = join(tmpdir(), `pair-panel-launch-${side}-${Date.now()}.cmd`)
   try {
     const pathLine = launchPathLine()
-    writeFileSync(scriptFile, `@echo off\r\nset PATH=${pathLine}${pathLine ? ';' : ''}%PATH%\r\ncd /d "${pair.cwd}"\r\n${cmdText}\r\n`, 'utf8')
+    writeFileSync(scriptFile, `@echo off\r\nset PATH=${pathLine}${pathLine ? ';' : ''}%PATH%\r\ncd /d "${launchCwd}"\r\n${cmdText}\r\n`, 'utf8')
     const child = spawn('cmd.exe', ['/c', 'start', '', scriptFile], { detached: true, stdio: 'ignore' })
     child.unref()
   } catch (e) {
     // Last resort: bare powershell (may not show a window, but still runs).
-    const child = spawn('powershell.exe', ['-NoExit', '-Command', cmdText], { detached: true, stdio: 'ignore', cwd: pair.cwd })
+    const child = spawn('powershell.exe', ['-NoExit', '-Command', cmdText], { detached: true, stdio: 'ignore', cwd: launchCwd })
     child.unref()
   }
 }
@@ -620,7 +790,11 @@ function launchPeerTerminal(side, pair, fresh) {
 export function apply(ctx) {
   const webServer = ctx.get('webServer')
   if (!webServer) return
-  webServer.register({
+  // Registrations are fiber-scoped: when DSH reloads the profile (HMR),
+  // disables/re-enables the plugin, or replaces the webServer service, the
+  // disposers remove the routes before apply() runs again. Registering
+  // directly would throw `duplicate exact route` on the second apply.
+  ctx.effect(() => webServer.register({
     kind: 'exact',
     path: '/agentbridge/notify',
     handler: async (req, res) => {
@@ -634,8 +808,8 @@ export function apply(ctx) {
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ ok: true }))
     },
-  })
-  webServer.register({
+  }), 'pair-panel: /agentbridge/notify route')
+  ctx.effect(() => webServer.register({
     kind: 'exact',
     path: '/pair-panel/snapshot',
     handler: async (req, res) => {
@@ -670,8 +844,8 @@ export function apply(ctx) {
       })
       res.end(body)
     },
-  })
-  webServer.register({
+  }), 'pair-panel: /pair-panel/snapshot route')
+  ctx.effect(() => webServer.register({
     kind: 'exact',
     path: '/pair-panel/launch',
     handler: async (req, res) => {
@@ -695,8 +869,23 @@ export function apply(ctx) {
             if (!pair || !pair.cwd || hasUnsafeChars(pair.cwd)) {
               data = { ok: false, error: 'pair not found' }
             } else {
-              launchPeerTerminal(side, pair, fresh)
-              data = { ok: true }
+              // The pair may have been created in a directory that no longer
+              // exists (common after moving the project). Launching there makes
+              // `cd` fail silently and starts the peer in the wrong folder, so
+              // fall back to a live workspace/session directory.
+              let cwd = pair.cwd
+              if (!await dirExists(ctx, cwd)) {
+                const fallback = await fallbackLaunchCwd(ctx)
+                if (!fallback) {
+                  data = { ok: false, error: 'pair cwd not found: ' + pair.cwd }
+                } else {
+                  cwd = fallback
+                }
+              }
+              if (!data) {
+                launchPeerTerminal(side, pair, fresh, cwd)
+                data = { ok: true, cwd }
+              }
             }
           }
         }
@@ -710,5 +899,5 @@ export function apply(ctx) {
       })
       res.end(bodyOut)
     },
-  })
+  }), 'pair-panel: /pair-panel/launch route')
 }

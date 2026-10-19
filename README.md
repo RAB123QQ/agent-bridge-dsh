@@ -31,6 +31,35 @@ config/            DSH MCP 配置示例
 
 
 
+## 兼容性（2026-10 适配 DSH 0.2.x）
+
+当前代码已同时适配 **DSH 0.1.x（老 web profile 流程）** 与 **DSH 0.2.x
+（桌面 App / 最新 web 版）**，且在 0.2.1-rc.2（桌面版 44.7.0 同版本）上实测通过：
+bundle 安装、host 半加载、三个 HTTP 路由、client bundle 进 `__DSH_BOOT__`、
+MCP 适配器握手与 tools/call 均正常。主要适配点：
+
+- **web / desktop 两条安装路径**：桌面 App 的 `desktop` profile 不能用普通
+  `dsh plugin --profile desktop` 管理（CLI 明确拒绝），改为「插件页本地目录安装」
+  或桌面自带 CLI；MCP 配置支持写 profile 或 home 层（一次覆盖两个 profile）。
+- **DSH 0.2.x 消息格式**：推送唤醒改用 session format v4 的
+  `source: { kind: 'plugin:ui-pair-panel' }`，避免 v4 编码器拒绝导致会话日志卡住。
+- **插件生命周期**：三个 route 注册包进 `ctx.effect`，兼容 HMR/禁用再启用；
+  client 半补 `exports.inject = ["slots"]`；`session.meta` → `session.header`。
+- **布局**：面板改为右侧通栏停靠栏（顶到标题栏下沿、与左侧侧边栏同风格），
+  不再悬浮在聊天上；会话标题栏右侧工具区放置显示/隐藏小图标，窄窗口不再与
+  文件夹图标重叠；消息按 Markdown 渲染；feed 滚动贴底逻辑加固（双 rAF +
+  关闭浏览器 scroll anchoring）。client 半把当前会话 id 传给 host，DSH 上下文
+  仪表在桌面版也能工作。
+- **适配器**：`abg dsh --pair` 自动识别并复用正在运行的桌面 App（netstat +
+  tasklist + `/manifest.webmanifest` 指纹，无需手填端口），不再重复起 web 实例；
+  修复 `abg dsh mcp` 子命令分发、Windows 下 `.cmd` 启动与错误处理；
+  MCP 配置默认带 `toolCallTimeoutMs: 300000`。
+- 一键安装：仓库根目录 `install-dsh.ps1 -Profile both`。
+
+版本细节、逐项改动与实测记录见 [COMPATIBILITY.md](COMPATIBILITY.md)。
+
+
+
 ## 架构
 
 ```text
@@ -129,13 +158,23 @@ cd agentbridge-dsh
 
 ### 4. 安装 dsh-pair-panel 面板插件（可选）
 
+DSH 0.2.x 有两类宿主，选对应的安装方式：
+
 ```bash
-cd ~/agent-bridge-dsh
+# A. CLI / 浏览器 web 版（profile = web）
 dsh plugin --profile web add "$PWD/dsh-pair-panel"
+
+# B. 桌面 App（profile = desktop，普通 dsh CLI 会拒绝该 profile）
+#    推荐：桌面 App 侧栏「插件」→「添加插件」→「安装第三方插件」→ 本地目录
+#    或完全退出 App 后，用桌面自带 CLI：
+#    "<安装目录>\resources\runtime\cli\bin\dsh.cmd" plugin --profile desktop add "<本目录绝对路径>"
+
+# C. 两边都装 + 自动写 MCP 配置（PowerShell 7）
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install-dsh.ps1 -Profile both
 ```
 
-安装后重启 `abg dsh --pair <name>`（或刷新已打开的页面）。详见
-[dsh-pair-panel/README.md](dsh-pair-panel/README.md)。
+安装后重启 `abg dsh --pair <name>` / 刷新页面；桌面 App 需重启或重新加载页面。
+详见 [dsh-pair-panel/README.md](dsh-pair-panel/README.md)。
 
 ### 5. 安装 Windows shim
 
@@ -171,11 +210,13 @@ agentbridge-dsh 的帮助。
 
 ### 6. 配置 DSH MCP
 
-把 `config/cordis.patch.yml.example` 中的插件配置合并到：
+把 `config/cordis.patch.yml.example` 中的插件配置合并到**当前宿主的 patch 层**：
 
-```text
-$DSH_HOME/profiles/web/cordis.patch.yml
-```
+| 宿主 | 文件 |
+|---|---|
+| 桌面 App（profile=desktop） | `$DSH_HOME/profiles/desktop/cordis.patch.yml` |
+| `dsh web` / `abg dsh`（profile=web） | `$DSH_HOME/profiles/web/cordis.patch.yml` |
+| 两者共用（推荐） | `$DSH_HOME/cordis.patch.yml`（home 层，对所有 profile 生效） |
 
 `DSH_HOME` 未设置时通常位于 `%USERPROFILE%\.dsh`。
 
@@ -189,10 +230,13 @@ $DSH_HOME/profiles/web/cordis.patch.yml
         serverName: abg
         transport: streamable-http
         url: http://127.0.0.1:8765/mcp
+        toolCallTimeoutMs: 300000   # 0.2.x 必加：默认 60s 会截断长回合
 ```
 
-`cordis.patch.yml` 是 override 配置，直接新增 `- id:` 可能被静默忽略。保存后如果
-DSH 工具列表没有更新，请重启 `dsh web`。
+`cordis.patch.yml` 是“覆盖/插入”层：插入新条目必须用 `- insert:`，直接写
+`- id:` 匹配不到已有条目时只会警告后丢弃；空文件/仅注释会导致启动失败，禁用时写
+`[]`。保存后 live profile 一般会 HMR 热生效；工具列表没更新就重启宿主进程
+（web 版 `dsh web`，桌面版重启 App）。
 
 ### 7. 配置桌面启动器（可选）
 

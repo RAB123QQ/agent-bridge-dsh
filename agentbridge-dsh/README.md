@@ -37,11 +37,21 @@ cd agentbridge-dsh
 其余命令（doctor / pairs / resume / kill / --pair ...）原样透传给真 abg。
 
 启动 DSH 侧（可选配 [dsh-pair-panel](https://github.com/RAB123QQ/agent-bridge-dsh/tree/main/dsh-pair-panel)
-插件显示 Codex 对端面板）：
+插件显示 Codex/Claude 对端面板）：
 
 ```bash
-abg dsh --pair NAME          # 一键：MCP server + DSH web + chromium 窗口 + attach
+abg dsh --pair NAME          # 一键：MCP server + DSH + chromium 窗口 + attach
 ```
+
+`abg dsh --pair NAME` 会自动识别宿主（DSH 0.2.x 适配）：
+
+- 桌面 App（DeepSeek Harness）正在运行 → **直接复用**它（自动从
+  `netstat` + `tasklist` 找到桌面版随机分配的 GUI 端口），不另起 `dsh web`，
+  也不开 Chromium 窗口；Codex 回复会 POST 到桌面版 GUI 的
+  `/agentbridge/notify` 实现推送唤醒。
+- 桌面版没运行 → 退回老行为：在 3080 起 `dsh web` + Chromium app 窗口。
+- 也可显式指定：`--dsh-web-url http://127.0.0.1:<port>`，或环境变量
+  `ABG_DSH_WEB_URL` / `DSH_WEB_URL`（在 DSH 会话 shell 里自动存在）。
 
 可选皮肤（左右鲸鱼娘角色，**第三方仓库**，不影响适配器功能）：
 [dsh-deep-whale / maid-atelier](https://github.com/Small-tailqwq/dsh-deep-whale) ·
@@ -88,13 +98,14 @@ test/loop-test.sh  全链路隔离测试（独立端口 4510/4511/4512，不碰 
 kill / --pair ...）全部原样透传给真 abg。
 
 ```bash
-abg dsh                 # 一键：DSH web + chromium 窗口 + 挂进当前 pair（幂等，已开则跳过）
+abg dsh                 # 一键：MCP + DSH（自动识别桌面版/web）+ chromium 窗口 + 挂进当前 pair（幂等，已开则跳过）
 abg dsh --server        # Role B：DSH 扮演 pair 的 codex app-server（配 abg claude 用）
 abg dsh --pair NAME     # 指定 pair（`abg --pair NAME dsh` 写法同样支持）
 abg dsh --http-port N   # MCP 端口（默认 8765）
-abg dsh --server 只起适配器；默认模式顺带拉起 DSH web（3080 未监听时）和
-chromium --app 窗口（未打开时）。环境变量可覆盖：
-ABG_DSH_WEB_URL / ABG_DSH_WEB_CMD / ABG_CHROMIUM_CMD / ABG_MCP_PORT / ABG_STATE_DIR
+abg dsh mcp --mode channel --http-port 8765   # 只起 MCP 适配器，不碰 DSH
+abg dsh --server 只起适配器；默认模式会先解析 DSH 宿主：桌面 App 在跑就直接复用，
+否则在 3080 未监听时拉起 `dsh web`，并按需打开 chromium --app 窗口。环境变量可覆盖：
+ABG_DSH_WEB_URL / DSH_WEB_URL / ABG_DSH_WEB_CMD / ABG_CHROMIUM_CMD / ABG_MCP_PORT / ABG_STATE_DIR
 
 # 底层命令（高级用法）
 abg dsh channel --proxy-port N --send "hello codex"   # 一次性发消息等回复
@@ -105,21 +116,37 @@ abg dsh doctor                                        # pair 端口健康检查
 
 ## 与 DSH 集成（cordis patch）
 
-在 `$DSH_HOME/profiles/web/cordis.patch.yml` 加一段（HMR 热生效，无需重启），
+在 profile 的 `cordis.patch.yml` 里加一段（live profile 一般会 HMR 热生效），
 DSH agent 就获得 `mcp__abg__send_message` / `mcp__abg__get_messages` /
-`mcp__abg__pair_status` 工具：
+`mcp__abg__pair_status` / `mcp__abg__claude_send` 工具：
 
 ```yaml
-- id: mcp-agentbridge
-  name: '@deepseek-ai/dsh-mcp-client'
-  config:
-    serverName: abg
-    transport: streamable-http
-    url: http://127.0.0.1:8765/mcp
+- insert:
+    - id: mcp-agentbridge
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: abg
+        transport: streamable-http
+        url: http://127.0.0.1:8765/mcp
+        toolCallTimeoutMs: 300000
 ```
 
-先起 MCP server：`abg-dsh mcp --mode channel --http-port 8765`（channel 模式对接
-codex 侧；server 模式对接 claude 侧，二选一或各起一个端口）。
+配置落点（DSH 0.2.x 有两类宿主）：
+
+| 宿主 | 文件 |
+|---|---|
+| 桌面 App（profile=desktop） | `$DSH_HOME/profiles/desktop/cordis.patch.yml` |
+| `dsh web` / `abg dsh`（profile=web） | `$DSH_HOME/profiles/web/cordis.patch.yml` |
+| 两者共用（推荐） | `$DSH_HOME/cordis.patch.yml`（home 层，对所有 profile 生效） |
+
+`toolCallTimeoutMs: 300000` 是必须的：DSH `dsh-mcp-client` 默认 60s，小于
+`send_message` 默认 180s / `claude_send` 默认 300s 的等待；不放开长回合会被
+DSH 侧先判超时（0.1.x 若报未知字段则删掉这一行）。
+
+先起 MCP server：`abg dsh mcp --mode channel --http-port 8765`（channel 模式对接
+codex 侧；server 模式对接 claude 侧，二选一或各起一个端口），或直接用
+`abg dsh --pair NAME`（它同时起 MCP 并复用/拉起 DSH）。仓库根目录的
+`install-dsh.ps1` 可以一次性完成「装面板 bundle + 写 MCP row」。
 
 ## 测试
 

@@ -1,13 +1,15 @@
 {
   "name": "@dsh-external/dsh-client-ui-pair-panel",
-  "description": "Pair panel: live DSH context gauge + Codex peer window (agentbridge pair status, token usage and rollout feed) for the dsh web GUI",
-  "version": "0.0.1",
+  "description": "Pair panel: live DSH context gauge + Codex/Claude peer windows (agentbridge pair status, token usage and rollout feed) for the DSH web GUI",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
     "./package.json": "./package.json"
   },
   "dsh": {
@@ -25,6 +27,8 @@
   "files": [
     "lib/index.js",
     "lib/client.js",
-    "cordis.patch.yml"
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg"
   ]
 }
